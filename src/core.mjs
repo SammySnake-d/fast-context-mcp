@@ -11,12 +11,12 @@
  *   → ANSWER: file paths + line ranges + suggested rg patterns
  */
 
-import { execFileSync } from "node:child_process";
-import { readdirSync, existsSync } from "node:fs";
+import { readdirSync, existsSync, statSync } from "node:fs";
 import { resolve, join, relative } from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { platform, arch, release, version as osVersion, hostname, cpus, totalmem } from "node:os";
+import treeNodeCli from "tree-node-cli";
 
 import {
   ProtobufEncoder,
@@ -80,12 +80,6 @@ directory, not \`.
   - tree: Display directory structure as a tree
     - Required: path (string)
     - Optional: levels (int)
-  - ls: List files in a directory
-    - Required: path (string)
-    - Optional: long_format (bool), all (bool)
-  - glob: Find files matching a glob pattern
-    - Required: pattern (string), path (string)
-    - Optional: type_filter (string: file/directory/all)
 
 # THINKING RULES
 - Think step-by-step. Plan, reason, and reflect before each tool call.
@@ -123,8 +117,7 @@ must change.
 # TOOL USE GUIDELINES
 - You must use a SINGLE restricted_exec call in your answer, that lets \
 you execute at most {max_commands} commands in a single turn. Each command must be \
-an object with a \`type\` field of \`rg\`, \`readfile\`, \`tree\`, \`ls\`, or \
-\`glob\` and the appropriate fields for that type.
+an object with a \`type\` field of \`rg\`, \`readfile\`, or \`tree\` and the appropriate fields for that type.
 - Example restricted_exec usage:
 [TOOL_CALLS]restricted_exec[ARGS]{{
   "command1": {{
@@ -686,26 +679,54 @@ function _parseResponse(data) {
 
 // ─── Core Search ───────────────────────────────────────────
 
+// Max safe tree size in bytes (server payload limit ~346KB, fixed overhead ~26KB,
+// leave room for conversation accumulation across rounds)
+const MAX_TREE_BYTES = 250 * 1024;
+
 /**
- * Get a level-1 directory tree of the project.
+ * Get a directory tree of the project with adaptive depth fallback.
+ *
+ * Tries the requested depth first. If the tree output exceeds MAX_TREE_BYTES,
+ * automatically falls back to lower depths until it fits.
+ *
  * @param {string} projectRoot
- * @returns {string}
+ * @param {number} [targetDepth=3] - Desired tree depth (1-6)
+ * @returns {{ tree: string, depth: number, sizeBytes: number, fellBack: boolean }}
  */
-function getRepoMap(projectRoot) {
-  try {
-    const stdout = execFileSync("tree", ["-L", "1", projectRoot], {
-      timeout: 10000,
-      encoding: "utf-8",
-    });
-    return stdout.replace(new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g"), "/codebase");
-  } catch {
-    // Fallback
+function getRepoMap(projectRoot, targetDepth = 3) {
+  const rootPattern = new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+  const dirName = projectRoot.split("/").pop() || projectRoot.split("\\").pop() || projectRoot;
+
+  for (let L = targetDepth; L >= 1; L--) {
     try {
-      const entries = readdirSync(projectRoot).sort();
-      return ["/codebase", ...entries.map((e) => `├── ${e}`)].join("\n");
+      const stdout = treeNodeCli(projectRoot, { maxDepth: L });
+      // tree-node-cli outputs basename as root line; replace with /codebase
+      let treeStr = stdout.replace(rootPattern, "/codebase");
+      // Also replace the basename root line (first line) if full path wasn't matched
+      const lines = treeStr.split("\n");
+      if (lines[0] === dirName) {
+        lines[0] = "/codebase";
+        treeStr = lines.join("\n");
+      }
+      const sizeBytes = Buffer.byteLength(treeStr, "utf-8");
+
+      if (sizeBytes <= MAX_TREE_BYTES) {
+        return { tree: treeStr, depth: L, sizeBytes, fellBack: L < targetDepth };
+      }
+      // Too large, try lower depth
     } catch {
-      return "/codebase\n(empty or inaccessible)";
+      // tree failed at this level, try lower
     }
+  }
+
+  // Ultimate fallback: simple ls
+  try {
+    const entries = readdirSync(projectRoot).sort();
+    const treeStr = ["/codebase", ...entries.map((e) => `├── ${e}`)].join("\n");
+    return { tree: treeStr, depth: 0, sizeBytes: Buffer.byteLength(treeStr, "utf-8"), fellBack: true };
+  } catch {
+    const treeStr = "/codebase\n(empty or inaccessible)";
+    return { tree: treeStr, depth: 0, sizeBytes: treeStr.length, fellBack: true };
   }
 }
 
@@ -746,6 +767,7 @@ function _parseAnswer(xmlText, projectRoot) {
  * @param {string} [opts.jwt] - JWT token (auto-fetched if not set)
  * @param {number} [opts.maxTurns=3] - Search rounds
  * @param {number} [opts.maxCommands=8] - Max commands per round
+ * @param {number} [opts.treeDepth=3] - Directory tree depth for repo map (1-6, auto fallback)
  * @param {number} [opts.timeoutMs=30000] - Connect-Timeout-Ms for streaming requests
  * @param {function} [opts.onProgress] - Progress callback
  * @returns {Promise<Object>}
@@ -757,6 +779,7 @@ export async function search({
   jwt = null,
   maxTurns = 3,
   maxCommands = 8,
+  treeDepth = 3,
   timeoutMs = 30000,
   onProgress = null,
 }) {
@@ -782,8 +805,9 @@ export async function search({
   const toolDefs = getToolDefinitions(maxCommands);
   const systemPrompt = buildSystemPrompt(maxTurns, maxCommands);
 
-  const repoMap = getRepoMap(projectRoot);
-  const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L 1 /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
+  const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack } = getRepoMap(projectRoot, treeDepth);
+  log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}`);
+  const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
 
   const messages = [
     { role: 5, content: systemPrompt },
@@ -820,6 +844,7 @@ export async function search({
       log("Received final answer");
       const result = _parseAnswer(answerXml, projectRoot);
       result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
+      result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack };
       return result;
     }
 
@@ -853,6 +878,7 @@ export async function search({
     files: [],
     error: "Max turns reached without getting an answer",
     rg_patterns: [...new Set(executor.collectedRgPatterns)],
+    _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack },
   };
 }
 
@@ -865,6 +891,7 @@ export async function search({
  * @param {string} [opts.apiKey]
  * @param {number} [opts.maxTurns=3]
  * @param {number} [opts.maxCommands=8]
+ * @param {number} [opts.treeDepth=3]
  * @param {number} [opts.timeoutMs=30000]
  * @returns {Promise<string>}
  */
@@ -874,12 +901,22 @@ export async function searchWithContent({
   apiKey = null,
   maxTurns = 3,
   maxCommands = 8,
+  treeDepth = 3,
   timeoutMs = 30000,
 }) {
-  const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, timeoutMs });
+  const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, treeDepth, timeoutMs });
 
   if (result.error) {
-    return `Error: ${result.error}`;
+    const meta = result._meta;
+    let errMsg = `Error: ${result.error}`;
+    if (meta) {
+      errMsg += `\n\n[diagnostic] tree_depth_used=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
+      if (meta.fellBack) {
+        errMsg += ` (auto fell back from requested depth)`;
+      }
+      errMsg += `\n[hint] If the error is payload-related, try a lower tree_depth value.`;
+    }
+    return errMsg;
   }
 
   const files = result.files || [];
@@ -910,6 +947,14 @@ export async function searchWithContent({
   if (uniquePatterns.length) {
     parts.push("");
     parts.push(`grep keywords: ${uniquePatterns.join(", ")}`);
+  }
+
+  // Append diagnostic metadata so the calling AI knows what happened
+  const meta = result._meta;
+  if (meta) {
+    const fbNote = meta.fellBack ? ` (fell back from requested depth)` : "";
+    parts.push("");
+    parts.push(`[config] tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}`);
   }
 
   return parts.join("\n");

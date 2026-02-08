@@ -9,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, resolve, relative, sep, basename } from "node:path";
 import { rgPath } from "@vscode/ripgrep";
+import treeNodeCli from "tree-node-cli";
 
 const RESULT_MAX_LINES = 50;
 const LINE_MAX_CHARS = 250;
@@ -190,54 +191,21 @@ export class ToolExecutor {
       return `Error: dir not found: ${path}`;
     }
 
-    // Try system tree command first
     try {
-      const args = [rp];
-      if (levels) args.push("-L", String(levels));
-      const stdout = execFileSync("tree", args, {
-        timeout: 15000,
-        encoding: "utf-8",
-      });
+      const opts = {};
+      if (levels) opts.maxDepth = levels;
+      let stdout = treeNodeCli(rp, opts);
+      // tree-node-cli outputs basename as root line; replace with virtual path
+      const dirName = rp.split("/").pop() || rp.split("\\").pop() || rp;
+      const lines = stdout.split("\n");
+      if (lines[0] === dirName) {
+        lines[0] = path;
+        stdout = lines.join("\n");
+      }
       return ToolExecutor._truncate(this._remap(stdout));
     } catch {
-      // Fallback to JS implementation
-      return this._treePy(rp, levels || 3, path);
+      return `Error: failed to generate tree for ${path}`;
     }
-  }
-
-  /**
-   * Pure JS tree fallback.
-   * @param {string} real
-   * @param {number} levels
-   * @param {string} virt
-   * @returns {string}
-   */
-  _treePy(real, levels, virt) {
-    const lines = [virt];
-
-    const walk = (p, prefix, depth) => {
-      if (depth >= levels) return;
-      let entries;
-      try {
-        entries = readdirSync(p).sort();
-      } catch {
-        return;
-      }
-      for (const e of entries) {
-        const fp = join(p, e);
-        lines.push(`${prefix}\u251c\u2500\u2500 ${e}`);
-        try {
-          if (statSync(fp).isDirectory() && !e.startsWith(".")) {
-            walk(fp, prefix + "\u2502   ", depth + 1);
-          }
-        } catch {
-          // Skip entries we can't stat
-        }
-      }
-    };
-
-    walk(real, "", 0);
-    return lines.slice(0, 300).join("\n");
   }
 
   /**
@@ -249,20 +217,52 @@ export class ToolExecutor {
    */
   ls(path, longFormat = false, allFiles = false) {
     const rp = this._real(path);
-    const args = [];
-    if (longFormat) args.push("-l");
-    if (allFiles) args.push("-a");
-    args.push(rp);
-
     try {
-      const stdout = execFileSync("ls", args, {
-        timeout: 10000,
-        encoding: "utf-8",
-      });
-      return ToolExecutor._truncate(this._remap(stdout));
+      const stat = statSync(rp);
+      if (!stat.isDirectory()) {
+        return `Error: not a directory: ${path}`;
+      }
+    } catch {
+      return `Error: dir not found: ${path}`;
+    }
+
+    let entries;
+    try {
+      entries = readdirSync(rp).sort();
     } catch (e) {
       return `Error: ${e.message}`;
     }
+
+    if (!allFiles) {
+      entries = entries.filter((e) => !e.startsWith("."));
+    }
+
+    if (!longFormat) {
+      return ToolExecutor._truncate(entries.join("\n"));
+    }
+
+    // Long format: emulate ls -l output
+    const lines = [`total ${entries.length}`];
+    for (const name of entries) {
+      const fp = join(rp, name);
+      try {
+        const st = statSync(fp);
+        const isDir = st.isDirectory();
+        const type = isDir ? "d" : "-";
+        const perm = "rwxr-xr-x";
+        const size = String(st.size).padStart(8);
+        const mtime = st.mtime;
+        const month = mtime.toLocaleString("en", { month: "short" });
+        const day = String(mtime.getDate()).padStart(2);
+        const hh = String(mtime.getHours()).padStart(2, "0");
+        const mm = String(mtime.getMinutes()).padStart(2, "0");
+        const dateStr = `${month} ${day} ${hh}:${mm}`;
+        lines.push(`${type}${perm}  1 user  staff ${size} ${dateStr} ${name}`);
+      } catch {
+        lines.push(`?---------  ? ?     ?        ? ? ?     ? ${name}`);
+      }
+    }
+    return ToolExecutor._truncate(this._remap(lines.join("\n")));
   }
 
   /**

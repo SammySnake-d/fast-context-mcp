@@ -2,7 +2,7 @@
 
 AI-driven semantic code search as an MCP tool — powered by Windsurf's reverse-engineered SWE-grep protocol.
 
-Any MCP-compatible client (Claude Code, Claude Desktop, Cursor, etc.) can use this to search codebases with natural language queries. Ripgrep is **bundled automatically** via `@vscode/ripgrep` — no manual installation needed.
+Any MCP-compatible client (Claude Code, Claude Desktop, Cursor, etc.) can use this to search codebases with natural language queries. All tools are bundled via npm — **no system-level dependencies** needed (ripgrep via `@vscode/ripgrep`, tree via `tree-node-cli`). Works on macOS, Windows, and Linux.
 
 ## How It Works
 
@@ -120,16 +120,19 @@ Default: `MODEL_SWE_1_6_FAST` — fastest speed, richest grep keywords, finest l
 
 ### `fast_context_search`
 
-AI-driven semantic code search.
+AI-driven semantic code search with tunable parameters.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `query` | string | Yes | Natural language search query |
-| `project_path` | string | No | Absolute path to project root (default: cwd) |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Natural language search query |
+| `project_path` | string | No | cwd | Absolute path to project root |
+| `tree_depth` | integer | No | `3` | Directory tree depth for repo map (1-6). Higher = more context but larger payload. Auto falls back to lower depth if tree exceeds 250KB. Use 1-2 for huge monorepos (>5000 files), 3 for most projects, 4-6 for small projects. |
+| `max_turns` | integer | No | `3` | Search rounds (1-5). More = deeper search but slower. Use 1-2 for simple lookups, 3 for most queries, 4-5 for complex analysis. |
 
 Returns:
 1. **Relevant files** with line ranges
 2. **Suggested search keywords** (rg patterns used during AI search)
+3. **Diagnostic metadata** (`[config]` line showing actual tree_depth used, tree size, and whether fallback occurred)
 
 Example output:
 ```
@@ -140,6 +143,16 @@ Found 3 relevant files.
   [3/3] /project/src/models/user.py (L20-80)
 
 grep keywords: authenticate, jwt.*verify, session.*token
+
+[config] tree_depth=3, tree_size=12.5KB, max_turns=3
+```
+
+Error output includes diagnostic hints:
+```
+Error: invalid_argument: an internal error occurred
+
+[diagnostic] tree_depth_used=3, tree_size=280.0KB (auto fell back from requested depth)
+[hint] If the error is payload-related, try a lower tree_depth value.
 ```
 
 ### `extract_windsurf_key`
@@ -164,18 +177,20 @@ fast-context-mcp/
 ## How the Search Works
 
 1. Project directory is mapped to virtual `/codebase` path
-2. Query + directory tree sent to Windsurf's Devstral model via Connect-RPC/Protobuf
-3. Devstral generates tool commands (ripgrep, file reads, tree, ls, glob)
-4. Commands executed locally in parallel (up to `FC_MAX_COMMANDS` per round)
-5. Results sent back to Devstral for the next round
-6. After `FC_MAX_TURNS` rounds, Devstral returns file paths + line ranges
-7. All rg patterns used during search are collected as suggested keywords
+2. Directory tree generated at requested depth (default L=3), with **automatic fallback** to lower depth if tree exceeds 250KB
+3. Query + directory tree sent to Windsurf's Devstral model via Connect-RPC/Protobuf
+4. Devstral generates tool commands (ripgrep, file reads, tree, ls, glob)
+5. Commands executed locally in parallel (up to `FC_MAX_COMMANDS` per round)
+6. Results sent back to Devstral for the next round
+7. After `max_turns` rounds, Devstral returns file paths + line ranges
+8. All rg patterns used during search are collected as suggested keywords
+9. Diagnostic metadata appended to help the calling AI tune parameters
 
 ## Technical Details
 
 - **Protocol**: Connect-RPC over HTTP/1.1, Protobuf encoding, gzip compression
 - **Model**: Devstral (`MODEL_SWE_1_6_FAST`, configurable)
-- **Local tools**: `rg` (bundled), `readfile`, `tree`, `ls`, `glob`
+- **Local tools**: `rg` (bundled via @vscode/ripgrep), `readfile` (Node.js fs), `tree` (tree-node-cli), `ls` (Node.js fs), `glob` (Node.js fs)
 - **Auth**: API Key → JWT (auto-fetched per session)
 - **Runtime**: Node.js >= 18 (ESM)
 
@@ -184,7 +199,8 @@ fast-context-mcp/
 | Package | Purpose |
 |---------|---------|
 | `@modelcontextprotocol/sdk` | MCP server framework |
-| `@vscode/ripgrep` | Bundled ripgrep binary |
+| `@vscode/ripgrep` | Bundled ripgrep binary (cross-platform) |
+| `tree-node-cli` | Cross-platform directory tree (replaces system `tree`) |
 | `better-sqlite3` | Read Windsurf's local SQLite DB |
 | `zod` | Schema validation (MCP SDK requirement) |
 

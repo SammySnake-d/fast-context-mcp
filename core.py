@@ -173,7 +173,7 @@ def proto_extract_strings(data: bytes) -> List[str]:
 # ─── 本地工具执行器 ────────────────────────────────────────
 
 RESULT_MAX_LINES = 50
-LINE_MAX_CHARS = 400
+LINE_MAX_CHARS = 250
 
 
 class ToolExecutor:
@@ -192,32 +192,127 @@ class ToolExecutor:
     @staticmethod
     def _truncate(text: str) -> str:
         lines = text.split("\n")
-        # 按行截断（匹配原版 Windsurf 行为：50 行限制 + 单行 ~400 字符截断）
+        # Match original Windsurf behavior: 50 line limit + ~250 char per-line silent truncation
         truncated_lines = []
         for line in lines[:RESULT_MAX_LINES]:
             if len(line) > LINE_MAX_CHARS:
-                truncated_lines.append(
-                    line[:LINE_MAX_CHARS] + f"... ({len(line) - LINE_MAX_CHARS} chars truncated)"
-                )
+                truncated_lines.append(line[:LINE_MAX_CHARS])
             else:
                 truncated_lines.append(line)
         text = "\n".join(truncated_lines)
         if len(lines) > RESULT_MAX_LINES:
-            text += f"\n... ({len(lines) - RESULT_MAX_LINES} lines truncated)"
+            text += "\n... (lines truncated) ..."
         return text
 
     def _remap(self, text: str) -> str:
         return text.replace(self.root, "/codebase")
 
-    @staticmethod
-    def _find_rg() -> str:
+    _rg_bin: str | None = None
+    _rg_checked: bool = False
+
+    @classmethod
+    def _find_rg(cls) -> str | None:
+        """Find rg binary. Returns path or None. Result is cached."""
+        if cls._rg_checked:
+            return cls._rg_bin
+        cls._rg_checked = True
         for candidate in ["rg", "/opt/homebrew/bin/rg", "/usr/local/bin/rg"]:
             try:
                 subprocess.run([candidate, "--version"], capture_output=True, timeout=5)
+                cls._rg_bin = candidate
                 return candidate
             except (FileNotFoundError, subprocess.TimeoutExpired):
                 continue
-        return "rg"
+        cls._rg_bin = None
+        return None
+
+    @staticmethod
+    def _glob_match(rel_path: str, filename: str, patterns: list[str]) -> bool:
+        """Check if a file matches any glob pattern."""
+        import fnmatch
+        for pat in patterns:
+            normalized = pat.replace("\\", "/")
+            # **/*.ext → match by filename
+            if normalized.startswith("**/"):
+                sub = normalized[3:]
+                if "/**" in sub:
+                    # **/dirname/** → handled by skip_dirs
+                    continue
+                if fnmatch.fnmatch(filename, sub):
+                    return True
+            elif fnmatch.fnmatch(rel_path, normalized):
+                return True
+            elif fnmatch.fnmatch(filename, normalized):
+                return True
+        return False
+
+    def _rg_python(self, pattern: str, real_path: str, virtual_path: str,
+                   include: list[str] | None, exclude: list[str] | None) -> str:
+        """Pure Python ripgrep replacement — zero external dependencies."""
+        try:
+            regex = re.compile(pattern)
+        except re.error:
+            regex = re.compile(re.escape(pattern))
+
+        results: list[str] = []
+        skip_dirs = {
+            ".git", "node_modules", "__pycache__", ".venv", "venv",
+            "dist", "build", ".cache", "target", ".tox", ".eggs",
+            ".mypy_cache", "coverage", "out",
+        }
+        # Add directory-based exclude patterns
+        if exclude:
+            for pat in exclude:
+                normalized = pat.lstrip("!").replace("\\", "/")
+                if normalized.startswith("**/") and normalized.endswith("/**"):
+                    skip_dirs.add(normalized[3:-3])
+
+        if os.path.isfile(real_path):
+            matches = self._rg_search_file(regex, real_path, RESULT_MAX_LINES)
+            for lineno, line in matches:
+                results.append(f"{virtual_path}:{lineno}:{line}")
+        else:
+            for root, dirs, files in os.walk(real_path):
+                dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+                for fname in sorted(files):
+                    fpath = os.path.join(root, fname)
+                    rel = os.path.relpath(fpath, real_path)
+                    if include and not self._glob_match(rel, fname, include):
+                        continue
+                    if exclude and self._glob_match(
+                        rel, fname, [p.lstrip("!") for p in exclude]
+                    ):
+                        continue
+                    matches = self._rg_search_file(regex, fpath, RESULT_MAX_LINES)
+                    vpath = virtual_path.rstrip("/") + "/" + rel.replace(os.sep, "/")
+                    for lineno, line in matches:
+                        results.append(f"{vpath}:{lineno}:{line}")
+                    if len(results) >= RESULT_MAX_LINES:
+                        break
+                if len(results) >= RESULT_MAX_LINES:
+                    break
+
+        output = "\n".join(results) if results else "(no matches)"
+        return self._truncate(self._remap(output))
+
+    @staticmethod
+    def _rg_search_file(regex, filepath: str, max_matches: int) -> list[tuple[int, str]]:
+        """Search a single file for regex matches."""
+        try:
+            with open(filepath, "rb") as f:
+                head = f.read(512)
+                if b"\x00" in head:
+                    return []
+            with open(filepath, "r", encoding="utf-8", errors="replace") as f:
+                matches = []
+                for lineno, line in enumerate(f, 1):
+                    if regex.search(line):
+                        matches.append((lineno, line.rstrip("\n\r")))
+                        if len(matches) >= max_matches:
+                            break
+                return matches
+        except (OSError, PermissionError):
+            return []
 
     def rg(self, pattern: str, path: str,
            include: list[str] | None = None,
@@ -227,6 +322,8 @@ class ToolExecutor:
         if not os.path.exists(rp):
             return f"Error: path does not exist: {path}"
         rg_bin = self._find_rg()
+        if rg_bin is None:
+            return self._rg_python(pattern, rp, path, include, exclude)
         cmd = [rg_bin, "--no-heading", "-n", "--max-count", "50", pattern, rp]
         if include:
             for g in include:
@@ -241,7 +338,7 @@ class ToolExecutor:
             err = r.stderr.decode("utf-8", errors="replace") if r.stderr else ""
             return self._truncate(self._remap(out or err or "(no matches)"))
         except FileNotFoundError:
-            return "Error: rg not found (brew install ripgrep)"
+            return self._rg_python(pattern, rp, path, include, exclude)
         except subprocess.TimeoutExpired:
             return "Error: timed out"
 

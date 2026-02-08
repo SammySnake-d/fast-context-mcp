@@ -37,7 +37,8 @@ Suggested search keywords:
 ## Prerequisites
 
 - **Python** >= 3.10
-- **[ripgrep](https://github.com/BurntSushi/ripgrep)** — required for code search
+- **Windsurf account** — free tier works. Needed for the API key.
+- **[ripgrep](https://github.com/BurntSushi/ripgrep)** *(optional, recommended)* — faster code search. If not installed, a built-in Python fallback is used automatically.
   ```bash
   # macOS
   brew install ripgrep
@@ -48,14 +49,13 @@ Suggested search keywords:
   # Windows
   choco install ripgrep
   ```
-- **Windsurf account** — free tier works. Needed for the API key.
 
 ## Installation
 
 ### Option 1: Clone and install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/fast-context-mcp.git
+git clone https://github.com/SammySnake-d/fast-context-mcp.git
 cd fast-context-mcp
 pip install -e .
 ```
@@ -63,7 +63,7 @@ pip install -e .
 ### Option 2: Direct use (no install)
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/fast-context-mcp.git
+git clone https://github.com/SammySnake-d/fast-context-mcp.git
 cd fast-context-mcp
 pip install mcp
 ```

@@ -896,11 +896,12 @@ export async function searchWithContent({
   const n = files.length;
 
   if (files.length) {
-    parts.push(`${n} files:`);
+    parts.push(`Found ${n} relevant files.`);
+    parts.push("");
     for (let i = 0; i < files.length; i++) {
       const entry = files[i];
       const rangesStr = entry.ranges.map(([s, e]) => `L${s}-${e}`).join(", ");
-      parts.push(`  ${entry.full_path} (${rangesStr})`);
+      parts.push(`  [${i + 1}/${n}] ${entry.full_path} (${rangesStr})`);
     }
   } else {
     parts.push("No files found.");

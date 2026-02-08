@@ -854,26 +854,19 @@ export async function searchWithContent({
   const n = files.length;
 
   if (files.length) {
-    parts.push(
-      `Found ${n} relevant files. IMPORTANT: You MUST examine ALL ${n} files below to fully understand the context.`
-    );
-    parts.push("");
+    parts.push(`${n} files:`);
     for (let i = 0; i < files.length; i++) {
       const entry = files[i];
       const rangesStr = entry.ranges.map(([s, e]) => `L${s}-${e}`).join(", ");
-      parts.push(`  [${i + 1}/${n}] ${entry.full_path} (${rangesStr})`);
+      parts.push(`  ${entry.full_path} (${rangesStr})`);
     }
   } else {
-    parts.push("No direct file matches found.");
+    parts.push("No files found.");
   }
 
   if (uniquePatterns.length) {
     parts.push("");
-    parts.push(
-      "Suggested search keywords (rg patterns used during AI search). " +
-      "Use these with grep/rg to discover additional relevant files:"
-    );
-    parts.push(`  ${uniquePatterns.join(", ")}`);
+    parts.push(`grep keywords: ${uniquePatterns.join(", ")}`);
   }
 
   return parts.join("\n");

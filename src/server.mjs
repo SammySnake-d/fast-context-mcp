@@ -27,20 +27,16 @@ const server = new McpServer({
   name: "windsurf-fast-context",
   version: "1.0.0",
   instructions:
-    "Windsurf Fast Context — AI-driven semantic code search tool. " +
-    "Returns relevant file paths with line ranges and suggested search keywords. " +
-    "IMPORTANT: Examine ALL returned files to get complete context. " +
-    "Use the suggested keywords with grep/rg to discover additional relevant files.",
+    "Windsurf Fast Context — AI-driven semantic code search. " +
+    "Returns file paths with line ranges and grep keywords.",
 });
 
 // ─── Tool: fast_context_search ─────────────────────────────
 
 server.tool(
   "fast_context_search",
-  "AI-driven semantic code search using Windsurf Fast Context. " +
-    "Performs multi-turn code search with ripgrep, file reading, and directory " +
-    "traversal to locate the most relevant code files and line ranges. " +
-    "Returns: 1) Relevant file list with line ranges 2) Suggested search keywords (rg patterns).",
+  "AI-driven semantic code search. " +
+    "Returns file paths with line ranges and grep keywords.",
   {
     query: z.string().describe(
       'Natural language search query (e.g. "where is auth handled", "database connection pool")'

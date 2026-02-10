@@ -825,7 +825,7 @@ export async function search({
     try {
       respData = await _streamingRequest(proto, timeoutMs);
     } catch (e) {
-      return { files: [], error: `Request failed: ${e.message}` };
+      return { files: [], error: `Request failed: ${e.message}`, httpStatus: e.status || null };
     }
 
     const [thinking, toolInfo] = _parseResponse(respData);
@@ -908,14 +908,31 @@ export async function searchWithContent({
 
   if (result.error) {
     const meta = result._meta;
+    const status = result.httpStatus;
     let errMsg = `Error: ${result.error}`;
-    if (meta) {
+
+    // HTTP status-specific hints
+    if (status === 403) {
+      errMsg += `\n\n[hint] 403 Forbidden: Authentication failed. The API key may be expired or revoked. ` +
+        `Try re-extracting with extract_windsurf_key, or set a fresh WINDSURF_API_KEY env var.`;
+    } else if (status === 401) {
+      errMsg += `\n\n[hint] 401 Unauthorized: Invalid API key or JWT. ` +
+        `Re-extract the key with extract_windsurf_key or set WINDSURF_API_KEY.`;
+    } else if (status === 429) {
+      errMsg += `\n\n[hint] 429 Rate limited: Too many requests. Wait a moment and retry.`;
+    } else if (status === 413 || (status >= 400 && meta)) {
       errMsg += `\n\n[diagnostic] tree_depth_used=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
       if (meta.fellBack) {
         errMsg += ` (auto fell back from requested depth)`;
       }
       errMsg += `\n[hint] If the error is payload-related, try a lower tree_depth value.`;
+    } else if (meta) {
+      errMsg += `\n\n[diagnostic] tree_depth_used=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
+      if (meta.fellBack) {
+        errMsg += ` (auto fell back from requested depth)`;
+      }
     }
+
     return errMsg;
   }
 

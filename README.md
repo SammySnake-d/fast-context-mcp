@@ -147,9 +147,16 @@ grep keywords: authenticate, jwt.*verify, session.*token
 [config] tree_depth=3, tree_size=12.5KB, max_turns=3
 ```
 
-Error output includes diagnostic hints:
+Error output includes status-specific hints:
 ```
-Error: invalid_argument: an internal error occurred
+Error: Request failed: HTTP 403
+
+[hint] 403 Forbidden: Authentication failed. The API key may be expired or revoked.
+Try re-extracting with extract_windsurf_key, or set a fresh WINDSURF_API_KEY env var.
+```
+
+```
+Error: Request failed: HTTP 413
 
 [diagnostic] tree_depth_used=3, tree_size=280.0KB (auto fell back from requested depth)
 [hint] If the error is payload-related, try a lower tree_depth value.

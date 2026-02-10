@@ -5,14 +5,36 @@
  * Matches Python ToolExecutor behavior exactly.
  */
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile as execFileCb } from "node:child_process";
 import { readdirSync, readFileSync, statSync, existsSync } from "node:fs";
 import { join, resolve, relative, sep, basename } from "node:path";
+import { promisify } from "node:util";
 import { rgPath } from "@vscode/ripgrep";
 import treeNodeCli from "tree-node-cli";
 
-const RESULT_MAX_LINES = 50;
-const LINE_MAX_CHARS = 250;
+const execFileAsync = promisify(execFileCb);
+
+/**
+ * Parse an integer env var with optional clamping.
+ * @param {string} name
+ * @param {number} defaultValue
+ * @param {{ min?: number, max?: number }} [opts]
+ * @returns {number}
+ */
+function readIntEnv(name, defaultValue, opts = {}) {
+  const raw = process.env[name];
+  const parsed = Number.parseInt(raw ?? "", 10);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  const min = typeof opts.min === "number" ? opts.min : null;
+  const max = typeof opts.max === "number" ? opts.max : null;
+  let value = parsed;
+  if (min !== null) value = Math.max(min, value);
+  if (max !== null) value = Math.min(max, value);
+  return value;
+}
+
+const RESULT_MAX_LINES = readIntEnv("FC_RESULT_MAX_LINES", 50, { min: 1, max: 500 });
+const LINE_MAX_CHARS = readIntEnv("FC_LINE_MAX_CHARS", 250, { min: 20, max: 10000 });
 
 export class ToolExecutor {
   /**
@@ -89,6 +111,52 @@ export class ToolExecutor {
       }
     }
     return false;
+  }
+
+  /**
+   * Search for pattern using @vscode/ripgrep (async version).
+   * @param {string} pattern
+   * @param {string} path
+   * @param {string[]|null} [include]
+   * @param {string[]|null} [exclude]
+   * @returns {Promise<string>}
+   */
+  async rgAsync(pattern, path, include = null, exclude = null) {
+    this.collectedRgPatterns.push(pattern);
+    const rp = this._real(path);
+    if (!existsSync(rp)) {
+      return `Error: path does not exist: ${path}`;
+    }
+
+    const args = ["--no-heading", "-n", "--max-count", "50", pattern, rp];
+    if (include) {
+      for (const g of include) {
+        args.push("--glob", g);
+      }
+    }
+    if (exclude) {
+      for (const g of exclude) {
+        args.push("--glob", `!${g}`);
+      }
+    }
+
+    try {
+      const { stdout } = await execFileAsync(rgPath, args, {
+        timeout: 30000,
+        maxBuffer: 10 * 1024 * 1024,
+        env: { ...process.env, RIPGREP_CONFIG_PATH: "" },
+        encoding: "utf-8",
+      });
+      return ToolExecutor._truncate(this._remap(stdout || "(no matches)"));
+    } catch (err) {
+      if (err.code === 1 || err.status === 1) {
+        return "(no matches)";
+      }
+      if (err.stderr) {
+        return ToolExecutor._truncate(this._remap(err.stderr));
+      }
+      return `Error: ${err.message}`;
+    }
   }
 
   /**
@@ -305,6 +373,30 @@ export class ToolExecutor {
   }
 
   /**
+   * Dispatch a command dict to the appropriate method (async).
+   * Uses async rg for parallelism, sync for others (they are fast enough).
+   * @param {Object} cmd
+   * @returns {Promise<string>}
+   */
+  async execCommandAsync(cmd) {
+    const t = cmd.type || "";
+    switch (t) {
+      case "rg":
+        return this.rgAsync(cmd.pattern, cmd.path, cmd.include || null, cmd.exclude || null);
+      case "readfile":
+        return this.readfile(cmd.file, cmd.start_line || null, cmd.end_line || null);
+      case "tree":
+        return this.tree(cmd.path, cmd.levels || null);
+      case "ls":
+        return this.ls(cmd.path, cmd.long_format || false, cmd.all || false);
+      case "glob":
+        return this.glob(cmd.pattern, cmd.path, cmd.type_filter || "all");
+      default:
+        return `Error: unknown command type '${t}'`;
+    }
+  }
+
+  /**
    * Dispatch a command dict to the appropriate method.
    * @param {Object} cmd
    * @returns {string}
@@ -325,6 +417,23 @@ export class ToolExecutor {
       default:
         return `Error: unknown command type '${t}'`;
     }
+  }
+
+  /**
+   * Execute all commandN keys from a tool call args dict (parallel).
+   * @param {Object} args
+   * @returns {Promise<string>}
+   */
+  async execToolCallAsync(args) {
+    const keys = Object.keys(args).filter((k) => k.startsWith("command")).sort();
+    const tasks = keys
+      .filter((key) => typeof args[key] === "object")
+      .map(async (key) => {
+        const output = await this.execCommandAsync(args[key]);
+        return `<${key}_result>\n${output}\n</${key}_result>`;
+      });
+    const results = await Promise.all(tasks);
+    return results.join("");
   }
 
   /**

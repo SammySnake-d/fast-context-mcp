@@ -2,6 +2,12 @@ node_modules/
 .DS_Store
 *.log
 
+# Local MCP config (may contain secrets)
+.mcp.json
+
+# Local docs (not for distribution)
+localdocs/
+
 # Legacy Python artifacts
 __pycache__/
 *.pyc

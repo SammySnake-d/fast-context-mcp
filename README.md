@@ -107,10 +107,15 @@ Add to `claude_desktop_config.json` under `mcpServers`:
 | `FC_MAX_TURNS` | `3` | Search rounds per query (more = deeper but slower) |
 | `FC_MAX_COMMANDS` | `8` | Max parallel commands per round |
 | `FC_TIMEOUT_MS` | `30000` | Connect-Timeout-Ms for streaming requests |
+| `FC_RESULT_MAX_LINES` | `50` | Max lines per command output (truncation) |
+| `FC_LINE_MAX_CHARS` | `250` | Max characters per output line (truncation) |
+| `WS_MODEL` | `MODEL_SWE_1_6_FAST` | Windsurf model name |
+| `WS_APP_VER` | `1.48.2` | Windsurf app version (protocol metadata) |
+| `WS_LS_VER` | `1.9544.35` | Windsurf language server version (protocol metadata) |
 
 ## Available Models
 
-The model can be changed by editing `WS_MODEL` in `src/core.mjs:37`.
+The model can be changed by setting `WS_MODEL` (see environment variables above).
 
 ![Available Models](docs/models.png)
 
@@ -128,6 +133,7 @@ AI-driven semantic code search with tunable parameters.
 | `project_path` | string | No | cwd | Absolute path to project root |
 | `tree_depth` | integer | No | `3` | Directory tree depth for repo map (1-6). Higher = more context but larger payload. Auto falls back to lower depth if tree exceeds 250KB. Use 1-2 for huge monorepos (>5000 files), 3 for most projects, 4-6 for small projects. |
 | `max_turns` | integer | No | `3` | Search rounds (1-5). More = deeper search but slower. Use 1-2 for simple lookups, 3 for most queries, 4-5 for complex analysis. |
+| `max_results` | integer | No | `10` | Maximum number of files to return (1-30). Smaller = more focused, larger = broader exploration. |
 
 Returns:
 1. **Relevant files** with line ranges

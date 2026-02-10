@@ -14,6 +14,7 @@
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@vscode/ripgrep": "^1.15.9",
     "better-sqlite3": "^11.0.0",
+    "tree-node-cli": "^1.6.0",
     "zod": "^3.23.0"
   },
   "license": "MIT"

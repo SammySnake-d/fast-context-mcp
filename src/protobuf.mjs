@@ -13,30 +13,30 @@ import { gzipSync, gunzipSync } from "node:zlib";
 
 export class ProtobufEncoder {
   constructor() {
-    /** @type {number[]} */
-    this._parts = [];
+    /** @type {Buffer[]} */
+    this._chunks = [];
   }
 
   /**
-   * Encode an unsigned varint.
+   * Encode an unsigned varint into a Buffer.
    * @param {number} value
-   * @returns {number[]}
+   * @returns {Buffer}
    */
   _varint(value) {
-    const parts = [];
+    const bytes = [];
     while (value > 0x7f) {
-      parts.push((value & 0x7f) | 0x80);
+      bytes.push((value & 0x7f) | 0x80);
       value >>>= 7;
     }
-    parts.push(value & 0x7f);
-    return parts;
+    bytes.push(value & 0x7f);
+    return Buffer.from(bytes);
   }
 
   /**
    * Encode a field tag.
    * @param {number} field
    * @param {number} wire
-   * @returns {number[]}
+   * @returns {Buffer}
    */
   _tag(field, wire) {
     return this._varint((field << 3) | wire);
@@ -49,8 +49,7 @@ export class ProtobufEncoder {
    * @returns {ProtobufEncoder}
    */
   writeVarint(field, value) {
-    this._parts.push(...this._tag(field, 0));
-    this._parts.push(...this._varint(value));
+    this._chunks.push(this._tag(field, 0), this._varint(value));
     return this;
   }
 
@@ -62,9 +61,7 @@ export class ProtobufEncoder {
    */
   writeString(field, value) {
     const data = Buffer.from(value, "utf-8");
-    this._parts.push(...this._tag(field, 2));
-    this._parts.push(...this._varint(data.length));
-    this._parts.push(...data);
+    this._chunks.push(this._tag(field, 2), this._varint(data.length), data);
     return this;
   }
 
@@ -75,9 +72,8 @@ export class ProtobufEncoder {
    * @returns {ProtobufEncoder}
    */
   writeBytes(field, value) {
-    this._parts.push(...this._tag(field, 2));
-    this._parts.push(...this._varint(value.length));
-    this._parts.push(...value);
+    const buf = Buffer.isBuffer(value) ? value : Buffer.from(value);
+    this._chunks.push(this._tag(field, 2), this._varint(buf.length), buf);
     return this;
   }
 
@@ -89,9 +85,7 @@ export class ProtobufEncoder {
    */
   writeMessage(field, sub) {
     const data = sub.toBuffer();
-    this._parts.push(...this._tag(field, 2));
-    this._parts.push(...this._varint(data.length));
-    this._parts.push(...data);
+    this._chunks.push(this._tag(field, 2), this._varint(data.length), data);
     return this;
   }
 
@@ -100,7 +94,7 @@ export class ProtobufEncoder {
    * @returns {Buffer}
    */
   toBuffer() {
-    return Buffer.from(this._parts);
+    return Buffer.concat(this._chunks);
   }
 }
 

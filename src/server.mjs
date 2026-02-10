@@ -8,6 +8,7 @@
  *   WINDSURF_API_KEY     — Windsurf API key (auto-discovered from local install if not set)
  *   FC_MAX_TURNS         — Search rounds per query (default: 3)
  *   FC_MAX_COMMANDS      — Max parallel commands per round (default: 8)
+ *   FC_TIMEOUT_MS        — Connect-Timeout-Ms for streaming requests (default: 30000)
  *
  * Start:
  *   node src/server.mjs
@@ -19,10 +20,29 @@ import { z } from "zod";
 
 import { searchWithContent, extractKeyInfo } from "./core.mjs";
 
+/**
+ * Parse an integer env var with optional clamping.
+ * @param {string} name
+ * @param {number} defaultValue
+ * @param {{ min?: number, max?: number }} [opts]
+ * @returns {number}
+ */
+function readIntEnv(name, defaultValue, opts = {}) {
+  const raw = process.env[name];
+  const parsed = Number.parseInt(raw ?? "", 10);
+  if (!Number.isFinite(parsed)) return defaultValue;
+  const min = typeof opts.min === "number" ? opts.min : null;
+  const max = typeof opts.max === "number" ? opts.max : null;
+  let value = parsed;
+  if (min !== null) value = Math.max(min, value);
+  if (max !== null) value = Math.min(max, value);
+  return value;
+}
+
 // Read config from environment
-const MAX_TURNS = parseInt(process.env.FC_MAX_TURNS || "3", 10);
-const MAX_COMMANDS = parseInt(process.env.FC_MAX_COMMANDS || "8", 10);
-const TIMEOUT_MS = parseInt(process.env.FC_TIMEOUT_MS || "30000", 10);
+const MAX_TURNS = readIntEnv("FC_MAX_TURNS", 3, { min: 1, max: 5 });
+const MAX_COMMANDS = readIntEnv("FC_MAX_COMMANDS", 8, { min: 1, max: 20 });
+const TIMEOUT_MS = readIntEnv("FC_TIMEOUT_MS", 30000, { min: 1000, max: 300000 });
 
 const server = new McpServer({
   name: "windsurf-fast-context",
@@ -35,6 +55,7 @@ const server = new McpServer({
     "REDUCE if you get payload/size errors. INCREASE for small projects where deeper structure helps.\n" +
     "- max_turns (1-5, default 3): How many search rounds. " +
     "INCREASE if results are incomplete. Use 1 for quick lookups.\n" +
+    "- max_results (1-30, default 10): Maximum number of files to return.\n" +
     "The response includes [config] and [diagnostic] lines — read them to decide if you should retry with different parameters.",
 });
 
@@ -84,8 +105,19 @@ server.tool(
         "Default 3. Use 1 for quick simple lookups. Use 4-5 for complex queries requiring deep tracing across many files. " +
         "More rounds = better results but slower and uses more API quota."
       ),
+    max_results: z
+      .number()
+      .int()
+      .min(1)
+      .max(30)
+      .default(10)
+      .describe(
+        "Maximum number of files to return. Default 10. " +
+        "Use a smaller value (3-5) for focused queries. " +
+        "Use a larger value (15-30) for broad exploration queries."
+      ),
   },
-  async ({ query, project_path, tree_depth, max_turns }) => {
+  async ({ query, project_path, tree_depth, max_turns, max_results }) => {
     let projectPath = project_path || process.cwd();
 
     try {
@@ -103,6 +135,7 @@ server.tool(
         projectRoot: projectPath,
         maxTurns: max_turns,
         maxCommands: MAX_COMMANDS,
+        maxResults: max_results,
         treeDepth: tree_depth,
         timeoutMs: TIMEOUT_MS,
       });

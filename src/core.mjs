@@ -32,9 +32,9 @@ import { extractKey } from "./extract-key.mjs";
 const API_BASE = "https://server.self-serve.windsurf.com/exa.api_server_pb.ApiServerService";
 const AUTH_BASE = "https://server.self-serve.windsurf.com/exa.auth_pb.AuthService";
 const WS_APP = "windsurf";
-const WS_APP_VER = "1.48.2";
-const WS_LS_VER = "1.9544.35";
-const WS_MODEL = "MODEL_SWE_1_6_FAST";
+const WS_APP_VER = process.env.WS_APP_VER || "1.48.2";
+const WS_LS_VER = process.env.WS_LS_VER || "1.9544.35";
+const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
 
 // ─── System Prompt Template ────────────────────────────────
 
@@ -172,6 +172,18 @@ Remember: Prefer narrow, fixed-string, and type-filtered searches with \
 aggressive excludes and size/depth limits. Widen scope only as needed. \
 Use the restricted tools available to you, and output your answer in \
 exactly the specified format.
+
+# NO RESULTS POLICY
+If after thorough searching you are confident that NO relevant files exist \
+for the given query (e.g., the function/class/concept does not exist in the \
+codebase), you MUST return an empty ANSWER:
+<ANSWER></ANSWER>
+Do NOT return irrelevant files (such as entry points or config files) just \
+to provide some output. An empty answer is always better than a misleading one.
+
+# RESULT COUNT
+Aim to return at most {max_results} files in your answer. Focus on the most \
+relevant files first. If fewer files are relevant, return fewer.
 `;
 
 const FINAL_FORCE_ANSWER =
@@ -180,12 +192,14 @@ const FINAL_FORCE_ANSWER =
 /**
  * @param {number} maxTurns
  * @param {number} maxCommands
+ * @param {number} maxResults
  * @returns {string}
  */
-function buildSystemPrompt(maxTurns = 3, maxCommands = 8) {
+function buildSystemPrompt(maxTurns = 3, maxCommands = 8, maxResults = 10) {
   return SYSTEM_PROMPT_TEMPLATE
     .replaceAll("{max_turns}", String(maxTurns))
-    .replaceAll("{max_commands}", String(maxCommands));
+    .replaceAll("{max_commands}", String(maxCommands))
+    .replaceAll("{max_results}", String(maxResults));
 }
 
 // ─── Tool Schema ───────────────────────────────────────────
@@ -311,6 +325,43 @@ function getApiKey() {
   );
 }
 
+// ─── JWT Cache ──────────────────────────────────────────────
+
+/** @type {Map<string, { token: string, expiresAt: number }>} */
+const _jwtCache = new Map();
+
+/**
+ * Decode JWT payload and extract expiration time.
+ * @param {string} jwt
+ * @returns {number} expiration timestamp in seconds
+ */
+function _getJwtExp(jwt) {
+  try {
+    const parts = jwt.split(".");
+    if (parts.length < 2) return 0;
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf-8"));
+    return payload.exp || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Get a cached or fresh JWT token.
+ * Refreshes when token expires or is within 60s of expiration.
+ * @param {string} apiKey
+ * @returns {Promise<string>}
+ */
+async function getCachedJwt(apiKey) {
+  const now = Math.floor(Date.now() / 1000);
+  const cached = _jwtCache.get(apiKey);
+  if (cached && cached.expiresAt > now + 60) return cached.token;
+  const token = await fetchJwt(apiKey);
+  const exp = _getJwtExp(token);
+  _jwtCache.set(apiKey, { token, expiresAt: exp || now + 3600 });
+  return token;
+}
+
 // ─── TLS Fallback ──────────────────────────────────────────
 // Match Python's SSL fallback: if NODE_TLS_REJECT_UNAUTHORIZED is not set
 // and the first fetch fails with a TLS error, disable cert verification.
@@ -320,6 +371,10 @@ function _applyTlsFallback() {
   if (!_tlsFallbackApplied && !process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
     _tlsFallbackApplied = true;
+    process.stderr.write(
+      "[fast-context] WARNING: TLS certificate verification disabled due to connection failure. " +
+      "Set NODE_TLS_REJECT_UNAUTHORIZED=0 explicitly to suppress this warning.\n"
+    );
   }
 }
 
@@ -375,23 +430,26 @@ async function _unaryRequest(url, protoBytes, compress = true) {
 }
 
 /**
- * Connect-RPC streaming POST to GetDevstralStream.
+ * Connect-RPC streaming POST to GetDevstralStream with retry.
  * @param {Buffer} protoBytes
  * @param {number} [timeoutMs=30000]
+ * @param {number} [maxRetries=2]
  * @returns {Promise<Buffer>}
  */
-async function _streamingRequest(protoBytes, timeoutMs = 30000) {
+async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2) {
   const frame = connectFrameEncode(protoBytes);
   const url = `${API_BASE}/GetDevstralStream`;
   const traceId = randomUUID().replace(/-/g, "");
   const spanId = randomUUID().replace(/-/g, "").slice(0, 16);
+  const baseTimeoutMs = Number.isFinite(timeoutMs) ? timeoutMs : 30000;
+  const abortMs = baseTimeoutMs + 5000;
 
   const headers = {
     "Content-Type": "application/connect+proto",
     "Connect-Protocol-Version": "1",
     "Connect-Accept-Encoding": "gzip",
     "Connect-Content-Encoding": "gzip",
-    "Connect-Timeout-Ms": String(timeoutMs),
+    "Connect-Timeout-Ms": String(baseTimeoutMs),
     "User-Agent": "connect-go/1.18.1 (go1.25.5)",
     "Accept-Encoding": "identity",
     "Baggage": `sentry-release=language-server-windsurf@${WS_LS_VER},` +
@@ -405,25 +463,54 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000) {
     method: "POST",
     headers,
     body: frame,
-    signal: AbortSignal.timeout(120000),
+    signal: AbortSignal.timeout(abortMs),
   });
 
-  let resp;
-  try {
-    resp = await doFetch();
-  } catch (e) {
-    _applyTlsFallback();
-    resp = await doFetch();
-  }
+  let lastErr;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      let resp;
+      try {
+        resp = await doFetch();
+      } catch (e) {
+        if (attempt === 0) {
+          _applyTlsFallback();
+          resp = await doFetch();
+        } else {
+          throw e;
+        }
+      }
 
-  if (!resp.ok) {
-    const err = new Error(`HTTP ${resp.status}`);
-    err.status = resp.status;
-    throw err;
-  }
+      if (!resp.ok) {
+        const err = new Error(`HTTP ${resp.status}`);
+        err.status = resp.status;
+        // Don't retry on 4xx client errors (except 429)
+        if (resp.status >= 400 && resp.status < 500 && resp.status !== 429) {
+          throw err;
+        }
+        lastErr = err;
+        if (attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+          continue;
+        }
+        throw err;
+      }
 
-  const arrayBuf = await resp.arrayBuffer();
-  return Buffer.from(arrayBuf);
+      const arrayBuf = await resp.arrayBuffer();
+      return Buffer.from(arrayBuf);
+    } catch (e) {
+      lastErr = e;
+      // Don't retry on 4xx client errors (except 429)
+      if (e.status && e.status >= 400 && e.status < 500 && e.status !== 429) {
+        throw e;
+      }
+      if (attempt < maxRetries) {
+        await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
+        continue;
+      }
+    }
+  }
+  throw lastErr;
 }
 
 /**
@@ -738,12 +825,18 @@ function getRepoMap(projectRoot, targetDepth = 3) {
  */
 function _parseAnswer(xmlText, projectRoot) {
   const files = [];
+  const resolvedRoot = resolve(projectRoot);
   const fileRegex = /<file\s+path="([^"]+)">([\s\S]*?)<\/file>/g;
   let fm;
   while ((fm = fileRegex.exec(xmlText)) !== null) {
     const vpath = fm[1];
     const rel = vpath.replace(/^\/codebase\/?/, "");
-    const fullPath = join(projectRoot, rel);
+
+    // Path safety: reject traversal attempts (../) and paths outside project root
+    const fullPath = resolve(projectRoot, rel);
+    if (!fullPath.startsWith(resolvedRoot + "/") && fullPath !== resolvedRoot) {
+      continue;
+    }
 
     const ranges = [];
     const rangeRegex = /<range>(\d+)-(\d+)<\/range>/g;
@@ -767,6 +860,7 @@ function _parseAnswer(xmlText, projectRoot) {
  * @param {string} [opts.jwt] - JWT token (auto-fetched if not set)
  * @param {number} [opts.maxTurns=3] - Search rounds
  * @param {number} [opts.maxCommands=8] - Max commands per round
+ * @param {number} [opts.maxResults=10] - Max number of files to return
  * @param {number} [opts.treeDepth=3] - Directory tree depth for repo map (1-6, auto fallback)
  * @param {number} [opts.timeoutMs=30000] - Connect-Timeout-Ms for streaming requests
  * @param {function} [opts.onProgress] - Progress callback
@@ -779,6 +873,7 @@ export async function search({
   jwt = null,
   maxTurns = 3,
   maxCommands = 8,
+  maxResults = 10,
   treeDepth = 3,
   timeoutMs = 30000,
   onProgress = null,
@@ -792,7 +887,7 @@ export async function search({
   }
   if (!jwt) {
     log("Fetching JWT...");
-    jwt = await fetchJwt(apiKey);
+    jwt = await getCachedJwt(apiKey);
   }
 
   // Check rate limit
@@ -803,7 +898,7 @@ export async function search({
 
   const executor = new ToolExecutor(projectRoot);
   const toolDefs = getToolDefinitions(maxCommands);
-  const systemPrompt = buildSystemPrompt(maxTurns, maxCommands);
+  const systemPrompt = buildSystemPrompt(maxTurns, maxCommands, maxResults);
 
   const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack } = getRepoMap(projectRoot, treeDepth);
   log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}`);
@@ -855,7 +950,7 @@ export async function search({
       const cmds = Object.keys(toolArgs).filter((k) => k.startsWith("command"));
       log(`Executing ${cmds.length} local commands`);
 
-      const results = executor.execToolCall(toolArgs);
+      const results = await executor.execToolCallAsync(toolArgs);
 
       messages.push({
         role: 2,
@@ -891,6 +986,7 @@ export async function search({
  * @param {string} [opts.apiKey]
  * @param {number} [opts.maxTurns=3]
  * @param {number} [opts.maxCommands=8]
+ * @param {number} [opts.maxResults=10]
  * @param {number} [opts.treeDepth=3]
  * @param {number} [opts.timeoutMs=30000]
  * @returns {Promise<string>}
@@ -901,10 +997,11 @@ export async function searchWithContent({
   apiKey = null,
   maxTurns = 3,
   maxCommands = 8,
+  maxResults = 10,
   treeDepth = 3,
   timeoutMs = 30000,
 }) {
-  const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, treeDepth, timeoutMs });
+  const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, maxResults, treeDepth, timeoutMs });
 
   if (result.error) {
     const meta = result._meta;
@@ -914,6 +1011,7 @@ export async function searchWithContent({
       if (meta.fellBack) {
         errMsg += ` (auto fell back from requested depth)`;
       }
+      errMsg += `\n[config] max_turns=${maxTurns}, max_results=${maxResults}, max_commands=${maxCommands}, timeout_ms=${timeoutMs}`;
       errMsg += `\n[hint] If the error is payload-related, try a lower tree_depth value.`;
     }
     return errMsg;
@@ -954,7 +1052,7 @@ export async function searchWithContent({
   if (meta) {
     const fbNote = meta.fellBack ? ` (fell back from requested depth)` : "";
     parts.push("");
-    parts.push(`[config] tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}`);
+    parts.push(`[config] tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}, max_results=${maxResults}, timeout_ms=${timeoutMs}`);
   }
 
   return parts.join("\n");

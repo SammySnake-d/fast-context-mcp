@@ -12,7 +12,7 @@
  */
 
 import { readdirSync, existsSync, statSync } from "node:fs";
-import { resolve, join, relative } from "node:path";
+import { resolve, join, relative, sep, isAbsolute } from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { platform, arch, release, version as osVersion, hostname, cpus, totalmem } from "node:os";
@@ -826,22 +826,24 @@ function getRepoMap(projectRoot, targetDepth = 3) {
 function _parseAnswer(xmlText, projectRoot) {
   const files = [];
   const resolvedRoot = resolve(projectRoot);
-  const fileRegex = /<file\s+path="([^"]+)">([\s\S]*?)<\/file>/g;
+  const fileRegex = /<file\s+path=(["'])([^"']+)\1>([\s\S]*?)<\/file>/g;
   let fm;
   while ((fm = fileRegex.exec(xmlText)) !== null) {
-    const vpath = fm[1];
-    const rel = vpath.replace(/^\/codebase\/?/, "");
+    const vpath = fm[2];
+    let rel = vpath.replace(/^\/codebase[\/\\]?/, "");
+    rel = rel.replace(/^[\/\\]+/, "");
 
     // Path safety: reject traversal attempts (../) and paths outside project root
     const fullPath = resolve(projectRoot, rel);
-    if (!fullPath.startsWith(resolvedRoot + "/") && fullPath !== resolvedRoot) {
+    const relToRoot = relative(resolvedRoot, fullPath);
+    if (relToRoot === ".." || relToRoot.startsWith(`..${sep}`) || isAbsolute(relToRoot)) {
       continue;
     }
 
     const ranges = [];
     const rangeRegex = /<range>(\d+)-(\d+)<\/range>/g;
     let rm;
-    while ((rm = rangeRegex.exec(fm[2])) !== null) {
+    while ((rm = rangeRegex.exec(fm[3])) !== null) {
       ranges.push([parseInt(rm[1], 10), parseInt(rm[2], 10)]);
     }
 

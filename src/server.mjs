@@ -56,6 +56,8 @@ const server = new McpServer({
     "- max_turns (1-5, default 3): How many search rounds. " +
     "INCREASE if results are incomplete. Use 1 for quick lookups.\n" +
     "- max_results (1-30, default 10): Maximum number of files to return.\n" +
+    "- exclude_paths (string array, default []): Directory/file patterns to exclude from tree. " +
+    "Use for large repos to reduce payload size (e.g. ['node_modules', 'dist', '.git']).\n" +
     "The response includes [config] and [diagnostic] lines — read them to decide if you should retry with different parameters.",
 });
 
@@ -116,8 +118,16 @@ server.tool(
         "Use a smaller value (3-5) for focused queries. " +
         "Use a larger value (15-30) for broad exploration queries."
       ),
+    exclude_paths: z
+      .array(z.string())
+      .default([])
+      .describe(
+        "Directory/file patterns to exclude from tree and search context. " +
+        "Useful for reducing payload size on large repos. " +
+        "Examples: ['node_modules', 'dist', '.git', 'build', 'coverage', '*.min.*']"
+      ),
   },
-  async ({ query, project_path, tree_depth, max_turns, max_results }) => {
+  async ({ query, project_path, tree_depth, max_turns, max_results, exclude_paths }) => {
     let projectPath = project_path || process.cwd();
 
     try {
@@ -138,10 +148,19 @@ server.tool(
         maxResults: max_results,
         treeDepth: tree_depth,
         timeoutMs: TIMEOUT_MS,
+        excludePaths: exclude_paths,
       });
       return { content: [{ type: "text", text: result }] };
     } catch (e) {
-      return { content: [{ type: "text", text: `Error: ${e.message}\n\n[hint] If this is a payload size error, try reducing tree_depth (current: ${tree_depth}).` }] };
+      const code = e.code || "UNKNOWN";
+      return { content: [{ type: "text", text:
+        `Error [${code}]: ${e.message}\n\n` +
+        `[hint] Suggestions based on error type:\n` +
+        `  - Reduce tree_depth (current: ${tree_depth})\n` +
+        `  - Add exclude_paths to filter large directories (e.g. ['node_modules', 'dist'])\n` +
+        `  - Narrow project_path to a subdirectory\n` +
+        `  - Reduce max_turns (current: ${max_turns})`
+      }] };
     }
   }
 );
@@ -155,7 +174,7 @@ server.tool(
     "Windsurf's local database. Set the result as WINDSURF_API_KEY env var.",
   {},
   async () => {
-    const result = extractKeyInfo();
+    const result = await extractKeyInfo();
 
     if (result.error) {
       const text = `Error: ${result.error}\n${result.hint || ""}\nDB path: ${result.db_path || "N/A"}`;

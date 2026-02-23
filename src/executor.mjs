@@ -52,8 +52,8 @@ export class ToolExecutor {
    * @returns {string}
    */
   _real(virtual) {
-    if (virtual.startsWith("/codebase")) {
-      const rel = virtual.slice("/codebase".length).replace(/^\/+/, "");
+    if (virtual.startsWith("/codebase") || virtual.startsWith("\\codebase")) {
+      const rel = virtual.slice("/codebase".length).replace(/^[\/\\]+/, "");
       return join(this.root, rel);
     }
     return virtual;
@@ -345,7 +345,6 @@ export class ToolExecutor {
 
     // Use recursive readdir + fnmatch since Node 22 globSync may not be available
     const matches = [];
-    const fullPattern = join(rp, pattern).replace(/\\/g, "/");
 
     try {
       _globWalk(rp, pattern, matches, typeFilter);

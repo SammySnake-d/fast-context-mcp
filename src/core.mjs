@@ -27,6 +27,51 @@ import {
 import { ToolExecutor } from "./executor.mjs";
 import { extractKey } from "./extract-key.mjs";
 
+// ─── Error Classification ──────────────────────────────────
+
+/**
+ * Classified error for fetch failures with structured error codes.
+ */
+class FastContextError extends Error {
+  /**
+   * @param {string} message
+   * @param {string} code - TIMEOUT | PAYLOAD_TOO_LARGE | RATE_LIMITED | AUTH_ERROR | SERVER_ERROR | NETWORK_ERROR
+   * @param {Object} [details]
+   */
+  constructor(message, code, details = {}) {
+    super(message);
+    this.name = "FastContextError";
+    this.code = code;
+    this.details = details;
+  }
+}
+
+/**
+ * Classify a raw fetch/HTTP error into a FastContextError.
+ * @param {Error} err
+ * @returns {FastContextError}
+ */
+function _classifyError(err) {
+  if (err instanceof FastContextError) return err;
+
+  // HTTP status-based classification
+  if (err.status) {
+    const s = err.status;
+    if (s === 413) return new FastContextError(err.message, "PAYLOAD_TOO_LARGE", { status: s });
+    if (s === 429) return new FastContextError(err.message, "RATE_LIMITED", { status: s });
+    if (s === 401 || s === 403) return new FastContextError(err.message, "AUTH_ERROR", { status: s });
+    return new FastContextError(err.message, "SERVER_ERROR", { status: s });
+  }
+
+  // Timeout (AbortSignal.timeout throws AbortError or TimeoutError)
+  if (err.name === "AbortError" || err.name === "TimeoutError" || /timeout/i.test(err.message)) {
+    return new FastContextError(err.message, "TIMEOUT");
+  }
+
+  // Everything else is a network-level issue
+  return new FastContextError(err.message, "NETWORK_ERROR");
+}
+
 // ─── Protocol Constants ────────────────────────────────────
 
 const API_BASE = "https://server.self-serve.windsurf.com/exa.api_server_pb.ApiServerService";
@@ -190,6 +235,26 @@ const FINAL_FORCE_ANSWER =
   "You have no turns left. Now you MUST provide your final ANSWER, even if it's not complete.";
 
 /**
+ * Trim accumulated messages to reduce payload size for retry.
+ * Keeps: system prompt (index 0), user query (index 1), and last 2 messages.
+ * Inserts a bridge note so the AI knows context was truncated.
+ * @param {Array} messages
+ * @returns {boolean} true if messages were actually trimmed
+ */
+function _trimMessages(messages) {
+  if (messages.length <= 4) return false;
+  const head = messages.slice(0, 2);
+  const tail = messages.slice(-2);
+  messages.length = 0;
+  messages.push(
+    ...head,
+    { role: 1, content: "[Prior search rounds omitted to reduce payload. Provide your best answer based on available context.]" },
+    ...tail,
+  );
+  return true;
+}
+
+/**
  * @param {number} maxTurns
  * @param {number} maxCommands
  * @param {number} maxResults
@@ -296,11 +361,11 @@ function getToolDefinitions(maxCommands = 8) {
 
 /**
  * Auto-discover Windsurf API key from local installation.
- * @returns {string|null}
+ * @returns {Promise<string|null>}
  */
-function autoDiscoverApiKey() {
+async function autoDiscoverApiKey() {
   try {
-    const result = extractKey();
+    const result = await extractKey();
     if (result.api_key && result.api_key.startsWith("sk-")) {
       return result.api_key;
     }
@@ -312,12 +377,12 @@ function autoDiscoverApiKey() {
 
 /**
  * Get API key from env var or auto-discovery.
- * @returns {string}
+ * @returns {Promise<string>}
  */
-function getApiKey() {
+async function getApiKey() {
   const key = process.env.WINDSURF_API_KEY;
   if (key) return key;
-  const discovered = autoDiscoverApiKey();
+  const discovered = await autoDiscoverApiKey();
   if (discovered) return discovered;
   throw new Error(
     "Windsurf API Key not found. Set WINDSURF_API_KEY env var or ensure Windsurf is logged in. " +
@@ -416,13 +481,17 @@ async function _unaryRequest(url, protoBytes, compress = true) {
   } catch (e) {
     // TLS or network error — try with cert verification disabled
     _applyTlsFallback();
-    resp = await doFetch();
+    try {
+      resp = await doFetch();
+    } catch (e2) {
+      throw _classifyError(e2);
+    }
   }
 
   if (!resp.ok) {
     const err = new Error(`HTTP ${resp.status}`);
     err.status = resp.status;
-    throw err;
+    throw _classifyError(err);
   }
 
   const arrayBuf = await resp.arrayBuffer();
@@ -502,7 +571,7 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2) 
       lastErr = e;
       // Don't retry on 4xx client errors (except 429)
       if (e.status && e.status >= 400 && e.status < 500 && e.status !== 429) {
-        throw e;
+        throw _classifyError(e);
       }
       if (attempt < maxRetries) {
         await new Promise((r) => setTimeout(r, 1000 * (attempt + 1)));
@@ -510,7 +579,7 @@ async function _streamingRequest(protoBytes, timeoutMs = 30000, maxRetries = 2) 
       }
     }
   }
-  throw lastErr;
+  throw _classifyError(lastErr);
 }
 
 /**
@@ -771,6 +840,29 @@ function _parseResponse(data) {
 const MAX_TREE_BYTES = 250 * 1024;
 
 /**
+ * Convert an exclude pattern (directory/file name or simple glob) to RegExp
+ * for tree-node-cli's exclude option.
+ * @param {string} pattern - e.g. "node_modules", "dist", "*.min.*"
+ * @returns {RegExp}
+ */
+function _excludePatternToRegex(pattern) {
+  if (!/[*?]/.test(pattern)) {
+    // Simple name — exact match
+    return new RegExp("^" + pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$");
+  }
+  // Glob → regex
+  let regex = "^";
+  for (const c of pattern) {
+    if (c === "*") regex += ".*";
+    else if (c === "?") regex += ".";
+    else if (".+^${}()|[]\\".includes(c)) regex += "\\" + c;
+    else regex += c;
+  }
+  regex += "$";
+  return new RegExp(regex);
+}
+
+/**
  * Get a directory tree of the project with adaptive depth fallback.
  *
  * Tries the requested depth first. If the tree output exceeds MAX_TREE_BYTES,
@@ -778,15 +870,19 @@ const MAX_TREE_BYTES = 250 * 1024;
  *
  * @param {string} projectRoot
  * @param {number} [targetDepth=3] - Desired tree depth (1-6)
+ * @param {string[]} [excludePaths=[]] - Patterns to exclude from tree
  * @returns {{ tree: string, depth: number, sizeBytes: number, fellBack: boolean }}
  */
-function getRepoMap(projectRoot, targetDepth = 3) {
+function getRepoMap(projectRoot, targetDepth = 3, excludePaths = []) {
   const rootPattern = new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
   const dirName = projectRoot.split("/").pop() || projectRoot.split("\\").pop() || projectRoot;
+  const excludeRegexes = excludePaths.length ? excludePaths.map(_excludePatternToRegex) : [];
 
   for (let L = targetDepth; L >= 1; L--) {
     try {
-      const stdout = treeNodeCli(projectRoot, { maxDepth: L });
+      const opts = { maxDepth: L };
+      if (excludeRegexes.length) opts.exclude = excludeRegexes;
+      const stdout = treeNodeCli(projectRoot, opts);
       // tree-node-cli outputs basename as root line; replace with /codebase
       let treeStr = stdout.replace(rootPattern, "/codebase");
       // Also replace the basename root line (first line) if full path wasn't matched
@@ -806,9 +902,12 @@ function getRepoMap(projectRoot, targetDepth = 3) {
     }
   }
 
-  // Ultimate fallback: simple ls
+  // Ultimate fallback: simple ls (also respects excludePaths)
   try {
-    const entries = readdirSync(projectRoot).sort();
+    let entries = readdirSync(projectRoot).sort();
+    if (excludeRegexes.length) {
+      entries = entries.filter((e) => !excludeRegexes.some((rx) => rx.test(e)));
+    }
     const treeStr = ["/codebase", ...entries.map((e) => `├── ${e}`)].join("\n");
     return { tree: treeStr, depth: 0, sizeBytes: Buffer.byteLength(treeStr, "utf-8"), fellBack: true };
   } catch {
@@ -865,6 +964,7 @@ function _parseAnswer(xmlText, projectRoot) {
  * @param {number} [opts.maxResults=10] - Max number of files to return
  * @param {number} [opts.treeDepth=3] - Directory tree depth for repo map (1-6, auto fallback)
  * @param {number} [opts.timeoutMs=30000] - Connect-Timeout-Ms for streaming requests
+ * @param {string[]} [opts.excludePaths=[]] - Patterns to exclude from tree
  * @param {function} [opts.onProgress] - Progress callback
  * @returns {Promise<Object>}
  */
@@ -878,6 +978,7 @@ export async function search({
   maxResults = 10,
   treeDepth = 3,
   timeoutMs = 30000,
+  excludePaths = [],
   onProgress = null,
 }) {
   const log = (msg) => onProgress?.(msg);
@@ -885,7 +986,7 @@ export async function search({
 
   // Get credentials
   if (!apiKey) {
-    apiKey = getApiKey();
+    apiKey = await getApiKey();
   }
   if (!jwt) {
     log("Fetching JWT...");
@@ -902,7 +1003,7 @@ export async function search({
   const toolDefs = getToolDefinitions(maxCommands);
   const systemPrompt = buildSystemPrompt(maxTurns, maxCommands, maxResults);
 
-  const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack } = getRepoMap(projectRoot, treeDepth);
+  const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack } = getRepoMap(projectRoot, treeDepth, excludePaths);
   log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}`);
   const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
 
@@ -922,7 +1023,31 @@ export async function search({
     try {
       respData = await _streamingRequest(proto, timeoutMs);
     } catch (e) {
-      return { files: [], error: `Request failed: ${e.message}`, httpStatus: e.status || null };
+      const errCode = e.code || "UNKNOWN";
+      const baseMeta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, errorCode: errCode };
+
+      // Auto-retry with trimmed context on payload/timeout errors
+      if ((errCode === "PAYLOAD_TOO_LARGE" || errCode === "TIMEOUT") && messages.length > 4) {
+        log(`${errCode} on turn ${turn + 1}: trimming context and retrying...`);
+        _trimMessages(messages);
+        const retryProto = _buildRequest(apiKey, jwt, messages, toolDefs);
+        try {
+          respData = await _streamingRequest(retryProto, timeoutMs);
+        } catch (retryErr) {
+          const retryCode = retryErr.code || errCode;
+          return {
+            files: [],
+            error: `${retryCode}: ${retryErr.message} (retry after context trim also failed)`,
+            _meta: { ...baseMeta, errorCode: retryCode, contextTrimmed: true },
+          };
+        }
+      } else {
+        return {
+          files: [],
+          error: `${errCode}: ${e.message}`,
+          _meta: baseMeta,
+        };
+      }
     }
 
     const [thinking, toolInfo] = _parseResponse(respData);
@@ -975,7 +1100,7 @@ export async function search({
     files: [],
     error: "Max turns reached without getting an answer",
     rg_patterns: [...new Set(executor.collectedRgPatterns)],
-    _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack },
+    _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot },
   };
 }
 
@@ -991,6 +1116,7 @@ export async function search({
  * @param {number} [opts.maxResults=10]
  * @param {number} [opts.treeDepth=3]
  * @param {number} [opts.timeoutMs=30000]
+ * @param {string[]} [opts.excludePaths=[]]
  * @returns {Promise<string>}
  */
 export async function searchWithContent({
@@ -1002,37 +1128,31 @@ export async function searchWithContent({
   maxResults = 10,
   treeDepth = 3,
   timeoutMs = 30000,
+  excludePaths = [],
 }) {
-  const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, maxResults, treeDepth, timeoutMs });
+  const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, maxResults, treeDepth, timeoutMs, excludePaths });
 
   if (result.error) {
     const meta = result._meta;
-    const status = result.httpStatus;
     let errMsg = `Error: ${result.error}`;
-
-    // HTTP status-specific hints
-    if (status === 403) {
-      errMsg += `\n\n[hint] 403 Forbidden: Authentication failed. The API key may be expired or revoked. ` +
-        `Try re-extracting with extract_windsurf_key, or set a fresh WINDSURF_API_KEY env var.`;
-    } else if (status === 401) {
-      errMsg += `\n\n[hint] 401 Unauthorized: Invalid API key or JWT. ` +
-        `Re-extract the key with extract_windsurf_key or set WINDSURF_API_KEY.`;
-    } else if (status === 429) {
-      errMsg += `\n\n[hint] 429 Rate limited: Too many requests. Wait a moment and retry.`;
-    } else if (status === 413 || (status >= 400 && meta)) {
-      errMsg += `\n\n[diagnostic] tree_depth_used=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
-      if (meta.fellBack) {
-        errMsg += ` (auto fell back from requested depth)`;
-      }
+    if (meta) {
+      errMsg += `\n\n[diagnostic] error_type=${meta.errorCode || "unknown"}, tree_depth_used=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
+      if (meta.fellBack) errMsg += ` (auto fell back from requested depth)`;
+      if (meta.contextTrimmed) errMsg += `, context_trimmed=true`;
+      if (meta.projectRoot) errMsg += `\n[diagnostic] project_path=${meta.projectRoot}`;
       errMsg += `\n[config] max_turns=${maxTurns}, max_results=${maxResults}, max_commands=${maxCommands}, timeout_ms=${timeoutMs}`;
-      errMsg += `\n[hint] If the error is payload-related, try a lower tree_depth value.`;
-    } else if (meta) {
-      errMsg += `\n\n[diagnostic] tree_depth_used=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
-      if (meta.fellBack) {
-        errMsg += ` (auto fell back from requested depth)`;
+      if (excludePaths.length) errMsg += `, exclude_paths=[${excludePaths.join(", ")}]`;
+      // Targeted hints based on error type
+      if (meta.errorCode === "PAYLOAD_TOO_LARGE" || meta.errorCode === "TIMEOUT") {
+        errMsg += `\n[hint] Payload/timeout error. Try: reduce tree_depth, reduce max_turns, add exclude_paths, or narrow project_path to a subdirectory.`;
+      } else if (meta.errorCode === "AUTH_ERROR") {
+        errMsg += `\n[hint] Authentication error. The API key may be expired or revoked. Try re-extracting with extract_windsurf_key, or set a fresh WINDSURF_API_KEY.`;
+      } else if (meta.errorCode === "RATE_LIMITED") {
+        errMsg += `\n[hint] Rate limited. Wait a moment and retry.`;
+      } else {
+        errMsg += `\n[hint] If the error is payload-related, try a lower tree_depth value or add exclude_paths.`;
       }
     }
-
     return errMsg;
   }
 
@@ -1071,7 +1191,9 @@ export async function searchWithContent({
   if (meta) {
     const fbNote = meta.fellBack ? ` (fell back from requested depth)` : "";
     parts.push("");
-    parts.push(`[config] tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}, max_results=${maxResults}, timeout_ms=${timeoutMs}`);
+    let configLine = `[config] tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}, max_results=${maxResults}, timeout_ms=${timeoutMs}`;
+    if (excludePaths.length) configLine += `, exclude_paths=[${excludePaths.join(", ")}]`;
+    parts.push(configLine);
   }
 
   return parts.join("\n");
@@ -1079,8 +1201,8 @@ export async function searchWithContent({
 
 /**
  * Extract Windsurf API Key info (for MCP tool use).
- * @returns {Object}
+ * @returns {Promise<Object>}
  */
-export function extractKeyInfo() {
+export async function extractKeyInfo() {
   return extractKey();
 }

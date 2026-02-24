@@ -52,6 +52,10 @@ export class ToolExecutor {
    * @returns {string}
    */
   _real(virtual) {
+    // Guard against undefined/null from malformed AI responses
+    if (virtual == null || typeof virtual !== "string") {
+      return this.root;
+    }
     if (virtual.startsWith("/codebase") || virtual.startsWith("\\codebase")) {
       const rel = virtual.slice("/codebase".length).replace(/^[\/\\]+/, "");
       return join(this.root, rel);
@@ -122,6 +126,12 @@ export class ToolExecutor {
    * @returns {Promise<string>}
    */
   async rgAsync(pattern, path, include = null, exclude = null) {
+    if (!pattern || typeof pattern !== "string") {
+      return "Error: missing or invalid pattern";
+    }
+    if (!path || typeof path !== "string") {
+      return "Error: missing or invalid path";
+    }
     this.collectedRgPatterns.push(pattern);
     const rp = this._real(path);
     if (!existsSync(rp)) {
@@ -168,6 +178,12 @@ export class ToolExecutor {
    * @returns {string}
    */
   rg(pattern, path, include = null, exclude = null) {
+    if (!pattern || typeof pattern !== "string") {
+      return "Error: missing or invalid pattern";
+    }
+    if (!path || typeof path !== "string") {
+      return "Error: missing or invalid path";
+    }
     this.collectedRgPatterns.push(pattern);
     const rp = this._real(path);
     if (!existsSync(rp)) {
@@ -215,6 +231,9 @@ export class ToolExecutor {
    * @returns {string}
    */
   readfile(file, startLine = null, endLine = null) {
+    if (!file || typeof file !== "string") {
+      return "Error: missing or invalid file path";
+    }
     const rp = this._real(file);
     try {
       const stat = statSync(rp);
@@ -249,6 +268,9 @@ export class ToolExecutor {
    * @returns {string}
    */
   tree(path, levels = null) {
+    if (!path || typeof path !== "string") {
+      return "Error: missing or invalid path";
+    }
     const rp = this._real(path);
     try {
       const stat = statSync(rp);
@@ -284,6 +306,9 @@ export class ToolExecutor {
    * @returns {string}
    */
   ls(path, longFormat = false, allFiles = false) {
+    if (!path || typeof path !== "string") {
+      return "Error: missing or invalid path";
+    }
     const rp = this._real(path);
     try {
       const stat = statSync(rp);
@@ -341,6 +366,12 @@ export class ToolExecutor {
    * @returns {string}
    */
   glob(pattern, path, typeFilter = "all") {
+    if (!pattern || typeof pattern !== "string") {
+      return "Error: missing or invalid pattern";
+    }
+    if (!path || typeof path !== "string") {
+      return "Error: missing or invalid path";
+    }
     const rp = this._real(path);
 
     // Use recursive readdir + fnmatch since Node 22 globSync may not be available
@@ -378,6 +409,9 @@ export class ToolExecutor {
    * @returns {Promise<string>}
    */
   async execCommandAsync(cmd) {
+    if (!cmd || typeof cmd !== "object") {
+      return "Error: missing or invalid command";
+    }
     const t = cmd.type || "";
     switch (t) {
       case "rg":
@@ -401,6 +435,9 @@ export class ToolExecutor {
    * @returns {string}
    */
   execCommand(cmd) {
+    if (!cmd || typeof cmd !== "object") {
+      return "Error: missing or invalid command";
+    }
     const t = cmd.type || "";
     switch (t) {
       case "rg":
@@ -424,13 +461,14 @@ export class ToolExecutor {
    * @returns {Promise<string>}
    */
   async execToolCallAsync(args) {
+    if (!args || typeof args !== "object") {
+      return "Error: missing or invalid tool args";
+    }
     const keys = Object.keys(args).filter((k) => k.startsWith("command")).sort();
-    const tasks = keys
-      .filter((key) => typeof args[key] === "object")
-      .map(async (key) => {
-        const output = await this.execCommandAsync(args[key]);
-        return `<${key}_result>\n${output}\n</${key}_result>`;
-      });
+    const tasks = keys.map(async (key) => {
+      const output = await this.execCommandAsync(args[key]);
+      return `<${key}_result>\n${output}\n</${key}_result>`;
+    });
     const results = await Promise.all(tasks);
     return results.join("");
   }
@@ -442,12 +480,13 @@ export class ToolExecutor {
    */
   execToolCall(args) {
     const parts = [];
+    if (!args || typeof args !== "object") {
+      return "Error: missing or invalid tool args";
+    }
     const keys = Object.keys(args).filter((k) => k.startsWith("command")).sort();
     for (const key of keys) {
-      if (typeof args[key] === "object") {
-        const output = this.execCommand(args[key]);
-        parts.push(`<${key}_result>\n${output}\n</${key}_result>`);
-      }
+      const output = this.execCommand(args[key]);
+      parts.push(`<${key}_result>\n${output}\n</${key}_result>`);
     }
     return parts.join("");
   }

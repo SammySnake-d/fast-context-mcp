@@ -1016,6 +1016,7 @@ export async function search({
   const totalApiCalls = maxTurns + 1;
   let compensatedTurns = 0; // 补偿的轮次数
   const MAX_COMPENSATIONS = 2; // 最大补偿次数，防止死循环
+  let forceAnswerInjected = false;
 
   for (let turn = 0; turn < totalApiCalls + compensatedTurns; turn++) {
     log(`Turn ${turn + 1}/${totalApiCalls}`);
@@ -1106,8 +1107,9 @@ export async function search({
       // Inject force-answer after last effective search round
       // Use effective turn count (excluding compensated turns) to avoid premature injection
       const effectiveTurn = turn - compensatedTurns;
-      if (effectiveTurn >= maxTurns - 1) {
+      if (effectiveTurn >= maxTurns - 1 && !forceAnswerInjected) {
         messages.push({ role: 1, content: FINAL_FORCE_ANSWER });
+        forceAnswerInjected = true;
         log("Injected force-answer prompt");
       }
     }

@@ -80,6 +80,7 @@ const WS_APP = "windsurf";
 const WS_APP_VER = process.env.WS_APP_VER || "1.48.2";
 const WS_LS_VER = process.env.WS_LS_VER || "1.9544.35";
 const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
+const DEBUG_MODE = process.env.FAST_CONTEXT_DEBUG === "1" || process.env.FAST_CONTEXT_DEBUG === "true";
 
 // ─── System Prompt Template ────────────────────────────────
 
@@ -132,6 +133,11 @@ directory, not \`.
 in real code, not assumptions.
 - If a command fails, rethink and try something different; do not \
 complain to the user.
+- AVOID REDUNDANT SEARCHES: Do not search for the same pattern multiple \
+times with slightly different paths or excludes. One well-targeted search \
+is better than multiple overlapping ones.
+- PRIORITIZE READING over searching: Once you find a file path, read it \
+directly instead of searching for more variations of the same pattern.
 
 # FAST-SEARCH DEFAULTS (optimize rg/tree on large repos)
 - Start NARROW, then widen only if needed. Prefer searching likely code \
@@ -235,22 +241,145 @@ const FINAL_FORCE_ANSWER =
   "You have no turns left. Now you MUST provide your final ANSWER, even if it's not complete.";
 
 /**
- * Trim accumulated messages to reduce payload size for retry.
- * Keeps: system prompt (index 0), user query (index 1), and last 2 messages.
- * Inserts a bridge note so the AI knows context was truncated.
+ * Smart trim accumulated messages to reduce payload size.
+ *
+ * Why this is needed:
+ * - Proto size grows quickly across turns (messages + tool results).
+ * - Keeping only the last N messages naively may drop the tool-call ↔ tool-result
+ *   linkage (tool_call_id/ref_call_id) and remove useful progress context.
+ *
+ * Strategy:
+ * - Keep system prompt (index 0).
+ * - Keep user problem statement, but compact the repo map when trimming.
+ * - Keep the latest tool-call + tool-result pair (plus any trailing prompts).
+ * - Insert a compact progress summary so the model doesn't lose the thread.
+ *
  * @param {Array} messages
- * @returns {boolean} true if messages were actually trimmed
+ * @param {Object} [state]
+ * @param {string} [state.query]
+ * @param {string[]} [state.recentFiles]
+ * @param {string[]} [state.recentPatterns]
+ * @param {Array<{type:string, desc:string}>} [state.recentCommands]
+ * @param {number} [state.turn]
+ * @returns {boolean} true if messages were actually trimmed/compacted
  */
-function _trimMessages(messages) {
-  if (messages.length <= 4) return false;
-  const head = messages.slice(0, 2);
-  const tail = messages.slice(-2);
+function _trimMessages(messages, state = {}) {
+  if (!Array.isArray(messages) || messages.length < 2) return false;
+
+  const systemMsg = messages[0];
+  const userMsg = messages[1];
+
+  const truncateToolResultsPreserve = (text, maxPerBlock = 4000, maxTotal = 20000) => {
+    if (typeof text !== "string" || text.length <= maxTotal) return text;
+    const re = /<(command\d+)_result>\n([\s\S]*?)\n<\/\1_result>/g;
+    let m;
+    const parts = [];
+    let matched = false;
+    while ((m = re.exec(text)) !== null) {
+      matched = true;
+      const key = m[1];
+      let body = m[2] || "";
+      if (body.length > maxPerBlock) {
+        body = body.slice(0, maxPerBlock) + "\n...[truncated]...";
+      }
+      parts.push(`<${key}_result>\n${body}\n</${key}_result>`);
+      if (parts.join("").length > maxTotal) break;
+    }
+    if (!matched) {
+      return text.slice(0, maxTotal) + "\n...[tool results truncated]...";
+    }
+    const out = parts.join("");
+    return out.length <= maxTotal ? out : out.slice(0, maxTotal) + "\n...[tool results truncated]...";
+  };
+
+  // Find the most recent tool-result message and its matching tool-call message (if present).
+  let lastToolResultIdx = -1;
+  let refId = null;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m && m.role === 4 && typeof m.ref_call_id === "string" && m.ref_call_id) {
+      lastToolResultIdx = i;
+      refId = m.ref_call_id;
+      break;
+    }
+  }
+
+  let lastToolCallIdx = -1;
+  if (refId) {
+    for (let i = lastToolResultIdx - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m && m.role === 2 && m.tool_call_id === refId) {
+        lastToolCallIdx = i;
+        break;
+      }
+    }
+  }
+
+  // Tail: keep tool-call + tool-result pair, plus anything after it (e.g., force-answer).
+  let tailStart = -1;
+  if (lastToolResultIdx !== -1) {
+    tailStart = lastToolCallIdx !== -1 ? lastToolCallIdx : Math.max(2, lastToolResultIdx - 1);
+  } else {
+    // No tool results yet: keep the last few messages only.
+    tailStart = Math.max(2, messages.length - 4);
+  }
+  const tail = messages.slice(tailStart);
+
+  // Compact the user message (repo map) when trimming, since it's usually the largest chunk.
+  let compactedUser = userMsg;
+  let didCompactUser = false;
+  if (userMsg && typeof userMsg.content === "string" && userMsg.content.includes("Repo Map")) {
+    const q =
+      (typeof state.query === "string" && state.query) ||
+      userMsg.content.match(/Problem Statement:\s*([^\n]+)/)?.[1]?.trim() ||
+      "";
+    const compact = `Problem Statement: ${q}\n\nRepo Map: (omitted to reduce payload). Use tree/rg to explore structure if needed.`;
+    if (compact.length < userMsg.content.length) {
+      compactedUser = { ...userMsg, content: compact };
+      didCompactUser = true;
+    }
+  }
+
+  // Build a compact progress summary to preserve important context across trims.
+  const recentCommands = Array.isArray(state.recentCommands) ? state.recentCommands : [];
+  const recentFiles = Array.isArray(state.recentFiles) ? state.recentFiles : [];
+  const recentPatterns = Array.isArray(state.recentPatterns) ? state.recentPatterns : [];
+  const turnNote = Number.isInteger(state.turn) ? ` turn=${state.turn}` : "";
+
+  const summaryLines = [
+    `[Context trimmed to reduce payload size.${turnNote}]`,
+    recentCommands.length ? `recent_commands: ${recentCommands.slice(-6).map((c) => c.desc).join(" | ")}` : "",
+    recentFiles.length ? `recent_files: ${recentFiles.slice(-12).join(", ")}` : "",
+    recentPatterns.length ? `rg_patterns: ${recentPatterns.slice(-20).join(", ")}` : "",
+    "Continue from the most recent tool results kept below.",
+  ].filter(Boolean);
+
+  const summaryMsg = { role: 1, content: summaryLines.join("\n") };
+
+  // If trimming doesn't actually reduce anything, bail.
+  // We consider it "useful" if we either compact the user message or drop history.
+  const willDropHistory = tailStart > 2;
+  if (!didCompactUser && !willDropHistory) return false;
+
+  // Reduce oversized assistant/tool messages in the tail to avoid immediate re-overflow.
+  for (const m of tail) {
+    if (m && typeof m.content === "string") {
+      if (m.role === 2 && m.content.length > 8000) {
+        m.content = m.content.slice(0, 8000) + "\n...[assistant content truncated]...";
+      }
+      if (m.role === 4 && m.content.length > 20000) {
+        m.content = truncateToolResultsPreserve(m.content, 4000, 20000);
+      }
+    }
+  }
+
   messages.length = 0;
-  messages.push(
-    ...head,
-    { role: 1, content: "[Prior search rounds omitted to reduce payload. Provide your best answer based on available context.]" },
-    ...tail,
-  );
+  messages.push(systemMsg);
+  // Avoid duplicating user message if it's already within the kept tail.
+  if (tailStart > 1) {
+    messages.push(compactedUser);
+  }
+  messages.push(summaryMsg, ...tail);
   return true;
 }
 
@@ -863,17 +992,50 @@ function _excludePatternToRegex(pattern) {
 }
 
 /**
+ * Count files in a directory (non-recursive, fast estimate).
+ * @param {string} dir
+ * @returns {number}
+ */
+function _countFilesQuick(dir) {
+  try {
+    return readdirSync(dir).length;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Estimate project size and suggest optimal tree depth.
+ * - Small project (< 500 entries): depth 4
+ * - Medium project (500-5000 entries): depth 3
+ * - Large project (> 5000 entries): depth 2
+ * @param {string} projectRoot
+ * @returns {number}
+ */
+function _suggestTreeDepth(projectRoot) {
+  const count = _countFilesQuick(projectRoot);
+  if (count < 500) return 4;
+  if (count <= 5000) return 3;
+  return 2;
+}
+
+/**
  * Get a directory tree of the project with adaptive depth fallback.
  *
  * Tries the requested depth first. If the tree output exceeds MAX_TREE_BYTES,
  * automatically falls back to lower depths until it fits.
  *
  * @param {string} projectRoot
- * @param {number} [targetDepth=3] - Desired tree depth (1-6)
+ * @param {number} [targetDepth=3] - Desired tree depth (0-6), 0 means auto
  * @param {string[]} [excludePaths=[]] - Patterns to exclude from tree
- * @returns {{ tree: string, depth: number, sizeBytes: number, fellBack: boolean }}
+ * @returns {{ tree: string, depth: number, sizeBytes: number, fellBack: boolean, autoDepth: boolean }}
  */
 function getRepoMap(projectRoot, targetDepth = 3, excludePaths = []) {
+  // Auto depth: if targetDepth is 0, use heuristic
+  const autoDepth = targetDepth === 0;
+  if (autoDepth) {
+    targetDepth = _suggestTreeDepth(projectRoot);
+  }
   const rootPattern = new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
   const dirName = projectRoot.split("/").pop() || projectRoot.split("\\").pop() || projectRoot;
   const excludeRegexes = excludePaths.length ? excludePaths.map(_excludePatternToRegex) : [];
@@ -894,7 +1056,7 @@ function getRepoMap(projectRoot, targetDepth = 3, excludePaths = []) {
       const sizeBytes = Buffer.byteLength(treeStr, "utf-8");
 
       if (sizeBytes <= MAX_TREE_BYTES) {
-        return { tree: treeStr, depth: L, sizeBytes, fellBack: L < targetDepth };
+        return { tree: treeStr, depth: L, sizeBytes, fellBack: L < targetDepth, autoDepth };
       }
       // Too large, try lower depth
     } catch {
@@ -909,10 +1071,10 @@ function getRepoMap(projectRoot, targetDepth = 3, excludePaths = []) {
       entries = entries.filter((e) => !excludeRegexes.some((rx) => rx.test(e)));
     }
     const treeStr = ["/codebase", ...entries.map((e) => `├── ${e}`)].join("\n");
-    return { tree: treeStr, depth: 0, sizeBytes: Buffer.byteLength(treeStr, "utf-8"), fellBack: true };
+    return { tree: treeStr, depth: 0, sizeBytes: Buffer.byteLength(treeStr, "utf-8"), fellBack: true, autoDepth };
   } catch {
     const treeStr = "/codebase\n(empty or inaccessible)";
-    return { tree: treeStr, depth: 0, sizeBytes: treeStr.length, fellBack: true };
+    return { tree: treeStr, depth: 0, sizeBytes: treeStr.length, fellBack: true, autoDepth };
   }
 }
 
@@ -1003,8 +1165,8 @@ export async function search({
   const toolDefs = getToolDefinitions(maxCommands);
   const systemPrompt = buildSystemPrompt(maxTurns, maxCommands, maxResults);
 
-  const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack } = getRepoMap(projectRoot, treeDepth, excludePaths);
-  log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}`);
+  const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack, autoDepth } = getRepoMap(projectRoot, treeDepth, excludePaths);
+  log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}${autoDepth ? " [auto]" : ""}`);
   const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
 
   const messages = [
@@ -1012,16 +1174,45 @@ export async function search({
     { role: 1, content: userContent },
   ];
 
+  // Trim state for smart context trimming
+  const trimState = {
+    query,
+    turn: 0,
+    recentFiles: [],
+    recentPatterns: [],
+    recentCommands: [],
+  };
+
   // Total API calls = maxTurns + 1 (last round for answer)
   const totalApiCalls = maxTurns + 1;
-  let compensatedTurns = 0; // 补偿的轮次数
-  const MAX_COMPENSATIONS = 2; // 最大补偿次数，防止死循环
+  let compensatedTurns = 0;
+  const MAX_COMPENSATIONS = 2;
   let forceAnswerInjected = false;
 
   for (let turn = 0; turn < totalApiCalls + compensatedTurns; turn++) {
     log(`Turn ${turn + 1}/${totalApiCalls}`);
+    trimState.turn = turn + 1;
 
-    const proto = _buildRequest(apiKey, jwt, messages, toolDefs);
+    let proto = _buildRequest(apiKey, jwt, messages, toolDefs);
+
+    // Debug logging
+    if (DEBUG_MODE) {
+      console.error(`\n[DEBUG] ===== Turn ${turn + 1} Request =====`);
+      console.error(`[DEBUG] Messages count: ${messages.length}`);
+      console.error(`[DEBUG] Last message role: ${messages[messages.length - 1]?.role}`);
+      console.error(`[DEBUG] Proto size: ${proto.length} bytes`);
+    }
+
+    // Preflight trim: proactively reduce payload if proto is already large.
+    const MAX_PROTO_BYTES = 320 * 1024;
+    if (proto.length > MAX_PROTO_BYTES && messages.length > 1) {
+      log(`Proto size ${proto.length} bytes > ${MAX_PROTO_BYTES}. Trimming context before request...`);
+      if (_trimMessages(messages, trimState)) {
+        proto = _buildRequest(apiKey, jwt, messages, toolDefs);
+        if (DEBUG_MODE) console.error(`[DEBUG] Proto size after trim: ${proto.length} bytes`);
+      }
+    }
+
     let respData;
     try {
       respData = await _streamingRequest(proto, timeoutMs);
@@ -1030,9 +1221,9 @@ export async function search({
       const baseMeta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, errorCode: errCode };
 
       // Auto-retry with trimmed context on payload/timeout errors
-      if ((errCode === "PAYLOAD_TOO_LARGE" || errCode === "TIMEOUT") && messages.length > 4) {
+      if ((errCode === "PAYLOAD_TOO_LARGE" || errCode === "TIMEOUT") && messages.length > 1) {
         log(`${errCode} on turn ${turn + 1}: trimming context and retrying...`);
-        _trimMessages(messages);
+        _trimMessages(messages, trimState);
         const retryProto = _buildRequest(apiKey, jwt, messages, toolDefs);
         try {
           respData = await _streamingRequest(retryProto, timeoutMs);
@@ -1054,6 +1245,14 @@ export async function search({
     }
 
     const [thinking, toolInfo] = _parseResponse(respData);
+
+    // Debug logging
+    if (DEBUG_MODE) {
+      console.error(`\n[DEBUG] ===== Turn ${turn + 1} Response =====`);
+      console.error(`[DEBUG] Response size: ${respData.length} bytes`);
+      console.error(`[DEBUG] Thinking: ${thinking.slice(0, 500)}${thinking.length > 500 ? '...' : ''}`);
+      console.error(`[DEBUG] Tool info: ${toolInfo ? `${toolInfo[0]}` : 'null'}`);
+    }
 
     if (toolInfo === null) {
       if (thinking.startsWith("[Error]")) {
@@ -1080,19 +1279,69 @@ export async function search({
       const cmds = Object.keys(toolArgs).filter((k) => k.startsWith("command"));
       log(`Executing ${cmds.length} local commands`);
 
-      const results = await executor.execToolCallAsync(toolArgs);
+      // Debug logging
+      if (DEBUG_MODE) {
+        console.error(`\n[DEBUG] ===== Tool Calls =====`);
+        for (const cmdKey of cmds) {
+          const cmd = toolArgs[cmdKey];
+          console.error(`[DEBUG] ${cmdKey}: ${JSON.stringify(cmd)}`);
+        }
+      }
 
-      // 检测到所有 command 都是无效的 → 不算有效轮次
-      const validCommands = cmds.filter(k => {
-        const c = toolArgs[k];
-        return c && c.type; // 至少有 type 字段
+      // Check for valid commands (those with a type field)
+      const validCommands = cmds.filter((k) => {
+        const cmd = toolArgs[k];
+        return cmd && typeof cmd === "object" && cmd.type;
       });
-
       if (validCommands.length === 0 && compensatedTurns < MAX_COMPENSATIONS) {
-        compensatedTurns++; // 补偿：这轮不算有效轮次
+        compensatedTurns++;
         log(`Turn compensation: no valid commands, extending search by 1 turn (${compensatedTurns}/${MAX_COMPENSATIONS})`);
       } else if (validCommands.length === 0) {
         log(`Turn compensation skipped: max compensations (${MAX_COMPENSATIONS}) reached, forcing turn advance`);
+      }
+
+      const results = await executor.execToolCallAsync(toolArgs);
+
+      // Update trim state with a compact summary of what we executed
+      try {
+        const tailUnique = (arr, n) => {
+          const out = [];
+          const seen = new Set();
+          for (let i = arr.length - 1; i >= 0 && out.length < n; i--) {
+            const v = arr[i];
+            if (typeof v !== "string" || !v) continue;
+            if (seen.has(v)) continue;
+            seen.add(v);
+            out.push(v);
+          }
+          return out.reverse();
+        };
+
+        const newCommands = [];
+        const newFiles = [];
+        const newPatterns = [];
+
+        for (const cmdKey of cmds) {
+          const cmd = toolArgs[cmdKey];
+          if (!cmd || typeof cmd !== "object") continue;
+          const t = cmd.type;
+          if (t === "rg" && cmd.pattern) {
+            newPatterns.push(cmd.pattern);
+            newCommands.push({ type: "rg", desc: `rg ${cmd.pattern}` });
+          } else if (t === "readfile" && cmd.file) {
+            const shortFile = cmd.file.replace(/^\/codebase\//, "");
+            newFiles.push(shortFile);
+            newCommands.push({ type: "readfile", desc: `read ${shortFile}` });
+          } else if (t === "tree" && cmd.path) {
+            newCommands.push({ type: "tree", desc: `tree ${cmd.path}` });
+          }
+        }
+
+        trimState.recentCommands = [...trimState.recentCommands, ...newCommands].slice(-12);
+        trimState.recentFiles = tailUnique([...trimState.recentFiles, ...newFiles], 20);
+        trimState.recentPatterns = tailUnique([...trimState.recentPatterns, ...newPatterns], 30);
+      } catch {
+        // Ignore errors in trim state update
       }
 
       messages.push({
@@ -1105,7 +1354,6 @@ export async function search({
       messages.push({ role: 4, content: results, ref_call_id: callId });
 
       // Inject force-answer after last effective search round
-      // Use effective turn count (excluding compensated turns) to avoid premature injection
       const effectiveTurn = turn - compensatedTurns;
       if (effectiveTurn >= maxTurns - 1 && !forceAnswerInjected) {
         messages.push({ role: 1, content: FINAL_FORCE_ANSWER });

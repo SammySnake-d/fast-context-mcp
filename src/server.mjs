@@ -51,7 +51,7 @@ const server = new McpServer({
     "Windsurf Fast Context — AI-driven semantic code search. " +
     "Returns file paths with line ranges and grep keywords.\n" +
     "Tunable parameters:\n" +
-    "- tree_depth (1-6, default 3): How much directory structure the remote AI sees. " +
+    "- tree_depth (0-6, default 3; 0=auto): How much directory structure the remote AI sees. " +
     "REDUCE if you get payload/size errors. INCREASE for small projects where deeper structure helps.\n" +
     "- max_turns (1-5, default 3): How many search rounds. " +
     "INCREASE if results are incomplete. Use 1 for quick lookups.\n" +
@@ -71,7 +71,8 @@ server.tool(
   "Parameter tuning guide:\n" +
   "- tree_depth: Controls how much directory structure the remote AI sees before searching. " +
   "If you get a payload/size error, REDUCE this value. " +
-  "If search results are too shallow (missing files in deep subdirectories), INCREASE this value.\n" +
+  "If search results are too shallow (missing files in deep subdirectories), INCREASE this value. " +
+  "Use 0 for auto depth based on project size.\n" +
   "- max_turns: Controls how many search-execute-feedback rounds the remote AI gets. " +
   "If results are incomplete or the AI didn't find enough files, INCREASE this value. " +
   "If you want a quick rough answer, use 1.\n" +
@@ -87,11 +88,12 @@ server.tool(
     tree_depth: z
       .number()
       .int()
-      .min(1)
+      .min(0)
       .max(6)
       .default(3)
       .describe(
         "Directory tree depth for the initial repo map sent to the remote AI. " +
+        "Use 0 for auto depth based on project size. " +
         "Default 3. Use 1-2 for huge monorepos (>5000 files) or if you get payload size errors. " +
         "Use 4-6 for small projects (<200 files) where you want the AI to see deeper structure. " +
         "Auto falls back to a lower depth if tree output exceeds 250KB."

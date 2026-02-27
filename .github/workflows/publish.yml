@@ -1,10 +1,18 @@
 name: Publish to npm
 
 on:
-  push:
-    branches:
-      - main
-      - 'feat/**'
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'npm tag (latest or next)'
+        required: true
+        default: 'latest'
+        type: choice
+        options:
+          - latest
+          - next
 
 jobs:
   publish:
@@ -28,10 +36,17 @@ jobs:
       - name: Determine npm tag
         id: tag
         run: |
-          if [[ "${{ github.ref_name }}" == "main" ]]; then
-            echo "tag=latest" >> $GITHUB_OUTPUT
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            # Pre-release tags (e.g., v1.3.0-beta.1) → next
+            if [[ "${{ github.ref }}" == *"beta"* ]] || [[ "${{ github.ref }}" == *"alpha"* ]] || [[ "${{ github.ref }}" == *"rc"* ]]; then
+              echo "tag=next" >> $GITHUB_OUTPUT
+            else
+              echo "tag=latest" >> $GITHUB_OUTPUT
+            fi
           else
-            echo "tag=next" >> $GITHUB_OUTPUT
+            echo "tag=latest" >> $GITHUB_OUTPUT
           fi
 
       - name: Publish to npm

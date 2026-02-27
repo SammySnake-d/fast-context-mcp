@@ -1052,10 +1052,17 @@ function _parseToolCall(text) {
   if (end === 0) end = raw.length;
 
   let args;
+  const jsonCandidate = raw.slice(0, end);
   try {
-    args = JSON.parse(raw.slice(0, end));
+    args = JSON.parse(jsonCandidate);
   } catch {
-    return null;
+    // Attempt lenient fix: unquoted keys like  exclude":  →  "exclude":
+    try {
+      const fixed = jsonCandidate.replace(/([{,]\s*)(\w+)\s*:/g, '$1"$2":');
+      args = JSON.parse(fixed);
+    } catch {
+      return null;
+    }
   }
 
   const thinking = text.slice(0, m.index).trim();
@@ -1800,7 +1807,10 @@ export async function searchWithContent({
 
   if (!files.length && !uniquePatterns.length) {
     const raw = result.raw_response || "";
-    return raw ? `No relevant files found.\n\nRaw response:\n${raw}` : "No relevant files found.";
+    if (!raw) return "No relevant files found.";
+    const MAX_RAW = 500;
+    const truncated = raw.length > MAX_RAW ? raw.slice(0, MAX_RAW) + "\n...[raw_response truncated]..." : raw;
+    return `No relevant files found.\n\nRaw response:\n${truncated}`;
   }
 
   const parts = [];

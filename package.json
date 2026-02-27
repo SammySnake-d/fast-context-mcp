@@ -1,15 +1,41 @@
 {
-  "name": "fast-context-mcp",
+  "name": "@sammysnake/fast-context-mcp",
   "version": "1.2.0",
   "description": "AI-driven semantic code search via reverse-engineered Windsurf protocol (Node.js)",
   "type": "module",
   "main": "src/server.mjs",
+  "bin": {
+    "fast-context-mcp": "src/server.mjs"
+  },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node src/server.mjs"
   },
   "engines": {
     "node": ">=18"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SammySnake-d/fast-context-mcp.git"
+  },
+  "homepage": "https://github.com/SammySnake-d/fast-context-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/SammySnake-d/fast-context-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "code-search",
+    "semantic-search",
+    "windsurf",
+    "devstral",
+    "ripgrep",
+    "claude",
+    "ai"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@vscode/ripgrep": "^1.15.9",

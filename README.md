@@ -192,7 +192,7 @@ AI-driven semantic code search with tunable parameters.
 |-----------|------|----------|---------|-------------|
 | `query` | string | Yes | — | Natural language search query |
 | `project_path` | string | No | cwd | Absolute path to project root |
-| `tree_depth` | integer | No | `3` | Main-phase repo map depth (`0-6`, `0=auto`). Higher = more structure context but larger payload. |
+| `tree_depth` | integer | No | `3` | Repo map depth for `classic` mode only (`0-6`, `0=auto`). Ignored in `bootstrap_hotspot` mode — use `bootstrap_tree_depth` and `hotspot_tree_depth` instead. |
 | `max_turns` | integer | No | `3` | Main-phase search rounds (`1-5`). More = deeper search but slower. |
 | `max_results` | integer | No | `10` | Maximum number of files to return (`1-30`). |
 | `exclude_paths` | string[] | No | `[]` | Extra exclude patterns merged with built-in default excludes (`node_modules`, `.git`, `dist`, `build`, `coverage`, `.venv`, ...). |

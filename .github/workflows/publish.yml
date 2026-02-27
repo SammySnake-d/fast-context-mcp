@@ -14,24 +14,22 @@ on:
           - latest
           - next
 
+permissions:
+  id-token: write  # Required for OIDC
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Install dependencies
-        run: npm ci
+      - run: npm ci
 
       - name: Determine npm tag
         id: tag
@@ -39,7 +37,6 @@ jobs:
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "tag=${{ github.event.inputs.tag }}" >> $GITHUB_OUTPUT
           elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
-            # Pre-release tags (e.g., v1.3.0-beta.1) → next
             if [[ "${{ github.ref }}" == *"beta"* ]] || [[ "${{ github.ref }}" == *"alpha"* ]] || [[ "${{ github.ref }}" == *"rc"* ]]; then
               echo "tag=next" >> $GITHUB_OUTPUT
             else
@@ -49,5 +46,4 @@ jobs:
             echo "tag=latest" >> $GITHUB_OUTPUT
           fi
 
-      - name: Publish to npm
-        run: npm publish --tag ${{ steps.tag.outputs.tag }} --access public --provenance
+      - run: npm publish --tag ${{ steps.tag.outputs.tag }} --access public --provenance

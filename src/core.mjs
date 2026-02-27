@@ -82,6 +82,46 @@ const WS_LS_VER = process.env.WS_LS_VER || "1.9544.35";
 const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
 const DEBUG_MODE = process.env.FAST_CONTEXT_DEBUG === "1" || process.env.FAST_CONTEXT_DEBUG === "true";
 
+// Default excludes aligned with Windsurf fast-search guidance.
+const DEFAULT_EXCLUDE_PATHS = [
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "coverage",
+  ".venv",
+  "venv",
+  "target",
+  "out",
+  ".cache",
+  "__pycache__",
+  "vendor",
+  "deps",
+  "third_party",
+  "logs",
+  "data",
+  "*.min.*",
+];
+
+// Repo-map optimization defaults (tunable via MCP params).
+const REPO_MAP_OPTIMIZER_DEFAULTS = {
+  mode: "bootstrap_hotspot", // classic | bootstrap_hotspot
+  bootstrapTreeDepth: 1,
+  hotspotTopK: 4,
+  hotspotTreeDepth: 2,
+  maxBytes: 120 * 1024,
+};
+
+function _mergeExcludePaths(excludePaths = []) {
+  const merged = [...DEFAULT_EXCLUDE_PATHS];
+  for (const p of excludePaths || []) {
+    if (typeof p === "string" && p && !merged.includes(p)) {
+      merged.push(p);
+    }
+  }
+  return merged;
+}
+
 // ─── System Prompt Template ────────────────────────────────
 
 const SYSTEM_PROMPT_TEMPLATE = `You are an expert software engineer, responsible for providing context \
@@ -240,6 +280,26 @@ relevant files first. If fewer files are relevant, return fewer.
 const FINAL_FORCE_ANSWER =
   "You have no turns left. Now you MUST provide your final ANSWER, even if it's not complete.";
 
+const BOOTSTRAP_PROMPT_TEMPLATE = `You are a bootstrap planning agent for codebase hotspot discovery.
+Your ONLY goal is to discover high-signal search keywords and hotspot directories for a later full search phase.
+
+# OUTPUT CONTRACT
+- Use the restricted_exec tool ONLY.
+- Prefer rg + tree commands. Avoid deep readfile unless absolutely necessary.
+- Do NOT output final <ANSWER> for code fixes in this phase.
+- Keep commands focused and broad enough to identify likely relevant modules quickly.
+
+# TOOL BUDGET
+- You have at most {max_turns} turns.
+- You may use up to {max_commands} commands per turn.
+
+# STRATEGY
+1) Start from the provided mini repo map.
+2) Use targeted rg patterns derived from the user problem.
+3) Use tree on likely top-level directories to identify hotspots.
+4) Stop once you have enough keyword and hotspot coverage for phase-2.
+`;
+
 /**
  * Smart trim accumulated messages to reduce payload size.
  *
@@ -394,6 +454,101 @@ function buildSystemPrompt(maxTurns = 3, maxCommands = 8, maxResults = 10) {
     .replaceAll("{max_turns}", String(maxTurns))
     .replaceAll("{max_commands}", String(maxCommands))
     .replaceAll("{max_results}", String(maxResults));
+}
+
+function buildBootstrapPrompt(maxTurns = 2, maxCommands = 6) {
+  return BOOTSTRAP_PROMPT_TEMPLATE
+    .replaceAll("{max_turns}", String(maxTurns))
+    .replaceAll("{max_commands}", String(maxCommands));
+}
+
+function _extractTopDirFromCodebasePath(path = "") {
+  const p = String(path || "").replace(/\\/g, "/");
+  if (!p.startsWith("/codebase")) return null;
+  const rel = p.replace(/^\/codebase\/?/, "");
+  if (!rel) return null;
+  return rel.split("/")[0] || null;
+}
+
+async function _runBootstrapPhase({
+  query,
+  projectRoot,
+  apiKey,
+  jwt,
+  timeoutMs,
+  excludePaths,
+  bootstrapTreeDepth,
+  bootstrapMaxTurns,
+  bootstrapMaxCommands,
+  onProgress,
+}) {
+  const log = (msg) => onProgress?.(`[bootstrap] ${msg}`);
+  const hints = { rgPatterns: [], hotDirs: [] };
+
+  try {
+    const { tree: miniMap, depth } = getRepoMap(projectRoot, bootstrapTreeDepth, excludePaths);
+    const systemPrompt = buildBootstrapPrompt(bootstrapMaxTurns, bootstrapMaxCommands);
+    const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${depth} /codebase):\n\`\`\`text\n${miniMap}\n\`\`\``;
+
+    const messages = [
+      { role: 5, content: systemPrompt },
+      { role: 1, content: userContent },
+    ];
+
+    const toolDefs = getToolDefinitions(bootstrapMaxCommands);
+    const executor = new ToolExecutor(projectRoot);
+
+    for (let turn = 0; turn < bootstrapMaxTurns; turn++) {
+      log(`Turn ${turn + 1}/${bootstrapMaxTurns}`);
+      const proto = _buildRequest(apiKey, jwt, messages, toolDefs);
+      let respData;
+      try {
+        respData = await _streamingRequest(proto, timeoutMs);
+      } catch (e) {
+        log(`request failed: ${e.code || "UNKNOWN"}`);
+        break;
+      }
+
+      const [thinking, toolInfo] = _parseResponse(respData);
+      if (!toolInfo) break;
+
+      const [toolName, toolArgs] = toolInfo;
+      if (toolName !== "restricted_exec") break;
+
+      const callId = randomUUID();
+      const argsJson = JSON.stringify(toolArgs);
+      const cmds = Object.keys(toolArgs).filter((k) => k.startsWith("command"));
+
+      for (const cmdKey of cmds) {
+        const cmd = toolArgs[cmdKey];
+        if (!cmd || typeof cmd !== "object") continue;
+        if (cmd.type === "rg" && typeof cmd.pattern === "string" && cmd.pattern) {
+          hints.rgPatterns.push(cmd.pattern);
+        }
+        if (cmd.type === "tree" && typeof cmd.path === "string") {
+          const top = _extractTopDirFromCodebasePath(cmd.path);
+          if (top) hints.hotDirs.push(top);
+        }
+      }
+
+      const results = await executor.execToolCallAsync(toolArgs);
+      messages.push({
+        role: 2,
+        content: thinking,
+        tool_call_id: callId,
+        tool_name: "restricted_exec",
+        tool_args_json: argsJson,
+      });
+      messages.push({ role: 4, content: results, ref_call_id: callId });
+    }
+  } catch {
+    // Bootstrap is best-effort. Fall back silently.
+  }
+
+  return {
+    rgPatterns: [...new Set(hints.rgPatterns)].slice(-30),
+    hotDirs: [...new Set(hints.hotDirs)].slice(-12),
+  };
 }
 
 // ─── Tool Schema ───────────────────────────────────────────
@@ -1078,6 +1233,142 @@ function getRepoMap(projectRoot, targetDepth = 3, excludePaths = []) {
   }
 }
 
+function _tokenizeQuery(query = "") {
+  return [...new Set(
+    String(query)
+      .toLowerCase()
+      .split(/[^a-z0-9_\-]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 3)
+  )];
+}
+
+function _scoreTopLevelDir(dirName, queryTokens = []) {
+  const name = String(dirName || "").toLowerCase();
+  let score = 0;
+
+  const commonRoots = ["src", "app", "lib", "packages", "services", "server", "backend", "frontend", "api"];
+  if (commonRoots.includes(name)) score += 2;
+
+  for (const token of queryTokens) {
+    if (name.includes(token)) score += 4;
+  }
+
+  return score;
+}
+
+function _listTopLevelDirs(projectRoot, excludePaths = []) {
+  const excludeRegexes = excludePaths.length ? excludePaths.map(_excludePatternToRegex) : [];
+  const out = [];
+  let entries = [];
+  try {
+    entries = readdirSync(projectRoot).sort();
+  } catch {
+    return out;
+  }
+
+  for (const e of entries) {
+    if (excludeRegexes.some((rx) => rx.test(e))) continue;
+    const abs = join(projectRoot, e);
+    try {
+      if (statSync(abs).isDirectory()) out.push(e);
+    } catch {
+      // ignore
+    }
+  }
+  return out;
+}
+
+function _buildSubtreeForDir(projectRoot, dir, levels = 2) {
+  const abs = join(projectRoot, dir);
+  const vRoot = `/codebase/${dir}`;
+  try {
+    const stdout = treeNodeCli(abs, { maxDepth: levels });
+    const dirName = abs.split("/").pop() || abs.split("\\").pop() || abs;
+    const lines = stdout.split("\n");
+    if (lines[0] === dirName) lines[0] = vRoot;
+    return lines.join("\n");
+  } catch {
+    return `${vRoot}\n  (failed to generate subtree)`;
+  }
+}
+
+function buildOptimizedRepoMap({
+  query,
+  projectRoot,
+  treeDepth,
+  excludePaths,
+  optimizer = {},
+  bootstrapHints = null,
+}) {
+  const cfg = { ...REPO_MAP_OPTIMIZER_DEFAULTS, ...(optimizer || {}) };
+  if (cfg.mode === "classic") {
+    const base = getRepoMap(projectRoot, treeDepth, excludePaths);
+    return {
+      ...base,
+      strategy: "classic",
+      hotDirs: [],
+    };
+  }
+
+  const bootstrapDepth = Math.max(1, Math.min(3, Number(cfg.bootstrapTreeDepth) || 1));
+  const hotspotTopK = Math.max(0, Math.min(8, Number(cfg.hotspotTopK) || 4));
+  const hotspotTreeDepth = Math.max(1, Math.min(4, Number(cfg.hotspotTreeDepth) || 2));
+  const maxBytes = Math.max(16 * 1024, Number(cfg.maxBytes) || REPO_MAP_OPTIMIZER_DEFAULTS.maxBytes);
+
+  const bootstrap = getRepoMap(projectRoot, bootstrapDepth, excludePaths);
+  const queryTokens = _tokenizeQuery(query);
+  const topDirs = _listTopLevelDirs(projectRoot, excludePaths);
+
+  const scored = topDirs
+    .map((d) => ({ dir: d, score: _scoreTopLevelDir(d, queryTokens) }))
+    .sort((a, b) => b.score - a.score || a.dir.localeCompare(b.dir));
+
+  if (bootstrapHints && Array.isArray(bootstrapHints.hotDirs) && bootstrapHints.hotDirs.length) {
+    const hintSet = new Set(bootstrapHints.hotDirs.map((d) => String(d).toLowerCase()));
+    for (const s of scored) {
+      if (hintSet.has(String(s.dir).toLowerCase())) s.score += 6;
+    }
+    scored.sort((a, b) => b.score - a.score || a.dir.localeCompare(b.dir));
+  }
+
+  const hotDirs = scored.filter((x) => x.score > 0).slice(0, hotspotTopK).map((x) => x.dir);
+
+  const hotspotSections = [];
+  for (const d of hotDirs) {
+    hotspotSections.push(_buildSubtreeForDir(projectRoot, d, hotspotTreeDepth));
+  }
+
+  let tree = bootstrap.tree;
+  if (hotspotSections.length) {
+    tree = `${bootstrap.tree}\n\n# Hotspot Subtrees\n${hotspotSections.join("\n\n")}`;
+  }
+
+  // Keep map under configurable budget.
+  let sizeBytes = Buffer.byteLength(tree, "utf-8");
+  if (sizeBytes > maxBytes && hotspotSections.length) {
+    let kept = [...hotspotSections];
+    while (kept.length > 0) {
+      kept.pop();
+      tree = kept.length
+        ? `${bootstrap.tree}\n\n# Hotspot Subtrees\n${kept.join("\n\n")}`
+        : bootstrap.tree;
+      sizeBytes = Buffer.byteLength(tree, "utf-8");
+      if (sizeBytes <= maxBytes) break;
+    }
+  }
+
+  return {
+    tree,
+    depth: bootstrap.depth,
+    sizeBytes: Buffer.byteLength(tree, "utf-8"),
+    fellBack: bootstrap.fellBack,
+    autoDepth: bootstrap.autoDepth,
+    strategy: "bootstrap_hotspot",
+    hotDirs,
+  };
+}
+
 /**
  * Parse answer XML into structured file + range data.
  * @param {string} xmlText
@@ -1141,10 +1432,19 @@ export async function search({
   treeDepth = 3,
   timeoutMs = 30000,
   excludePaths = [],
+  repoMapMode = "bootstrap_hotspot",
+  bootstrapTreeDepth = 1,
+  hotspotTopK = 4,
+  hotspotTreeDepth = 2,
+  hotspotMaxBytes = 120 * 1024,
+  bootstrapEnabled = true,
+  bootstrapMaxTurns = 2,
+  bootstrapMaxCommands = 6,
   onProgress = null,
 }) {
   const log = (msg) => onProgress?.(msg);
   projectRoot = resolve(projectRoot);
+  const effectiveExcludePaths = _mergeExcludePaths(excludePaths);
 
   // Get credentials
   if (!apiKey) {
@@ -1165,8 +1465,38 @@ export async function search({
   const toolDefs = getToolDefinitions(maxCommands);
   const systemPrompt = buildSystemPrompt(maxTurns, maxCommands, maxResults);
 
-  const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack, autoDepth } = getRepoMap(projectRoot, treeDepth, excludePaths);
-  log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}${autoDepth ? " [auto]" : ""}`);
+  let bootstrapHints = null;
+  if (bootstrapEnabled) {
+    bootstrapHints = await _runBootstrapPhase({
+      query,
+      projectRoot,
+      apiKey,
+      jwt,
+      timeoutMs,
+      excludePaths: effectiveExcludePaths,
+      bootstrapTreeDepth,
+      bootstrapMaxTurns,
+      bootstrapMaxCommands,
+      onProgress,
+    });
+    log(`Bootstrap hints: patterns=${bootstrapHints.rgPatterns.length}, hot_dirs=${bootstrapHints.hotDirs.length}`);
+  }
+
+  const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack, autoDepth, strategy: repoMapStrategy, hotDirs = [] } = buildOptimizedRepoMap({
+    query,
+    projectRoot,
+    treeDepth,
+    excludePaths: effectiveExcludePaths,
+    optimizer: {
+      mode: repoMapMode,
+      bootstrapTreeDepth,
+      hotspotTopK,
+      hotspotTreeDepth,
+      maxBytes: hotspotMaxBytes,
+    },
+    bootstrapHints,
+  });
+  log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}${autoDepth ? " [auto]" : ""} [strategy=${repoMapStrategy}]${hotDirs.length ? ` [hot=${hotDirs.join(",")}]` : ""}`);
   const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
 
   const messages = [
@@ -1218,7 +1548,15 @@ export async function search({
       respData = await _streamingRequest(proto, timeoutMs);
     } catch (e) {
       const errCode = e.code || "UNKNOWN";
-      const baseMeta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot, errorCode: errCode };
+      const baseMeta = {
+        treeDepth: actualDepth,
+        treeSizeKB: +(treeSizeBytes / 1024).toFixed(1),
+        fellBack,
+        projectRoot,
+        errorCode: errCode,
+        repoMapStrategy,
+        hotDirs,
+      };
 
       // Auto-retry with trimmed context on payload/timeout errors
       if ((errCode === "PAYLOAD_TOO_LARGE" || errCode === "TIMEOUT") && messages.length > 1) {
@@ -1268,7 +1606,13 @@ export async function search({
       log("Received final answer");
       const result = _parseAnswer(answerXml, projectRoot);
       result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
-      result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack };
+      result._meta = {
+        treeDepth: actualDepth,
+        treeSizeKB: +(treeSizeBytes / 1024).toFixed(1),
+        fellBack,
+        repoMapStrategy,
+        hotDirs,
+      };
       return result;
     }
 
@@ -1367,7 +1711,14 @@ export async function search({
     files: [],
     error: "Max turns reached without getting an answer",
     rg_patterns: [...new Set(executor.collectedRgPatterns)],
-    _meta: { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, projectRoot },
+    _meta: {
+      treeDepth: actualDepth,
+      treeSizeKB: +(treeSizeBytes / 1024).toFixed(1),
+      fellBack,
+      projectRoot,
+      repoMapStrategy,
+      hotDirs,
+    },
   };
 }
 
@@ -1396,8 +1747,34 @@ export async function searchWithContent({
   treeDepth = 3,
   timeoutMs = 30000,
   excludePaths = [],
+  repoMapMode = "bootstrap_hotspot",
+  bootstrapTreeDepth = 1,
+  hotspotTopK = 4,
+  hotspotTreeDepth = 2,
+  hotspotMaxBytes = 120 * 1024,
+  bootstrapEnabled = true,
+  bootstrapMaxTurns = 2,
+  bootstrapMaxCommands = 6,
 }) {
-  const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, maxResults, treeDepth, timeoutMs, excludePaths });
+  const result = await search({
+    query,
+    projectRoot,
+    apiKey,
+    maxTurns,
+    maxCommands,
+    maxResults,
+    treeDepth,
+    timeoutMs,
+    excludePaths,
+    repoMapMode,
+    bootstrapTreeDepth,
+    hotspotTopK,
+    hotspotTreeDepth,
+    hotspotMaxBytes,
+    bootstrapEnabled,
+    bootstrapMaxTurns,
+    bootstrapMaxCommands,
+  });
 
   if (result.error) {
     const meta = result._meta;

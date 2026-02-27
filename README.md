@@ -107,6 +107,14 @@ Add to `claude_desktop_config.json` under `mcpServers`:
 | `FC_MAX_TURNS` | `3` | Search rounds per query (more = deeper but slower) |
 | `FC_MAX_COMMANDS` | `8` | Max parallel commands per round |
 | `FC_TIMEOUT_MS` | `30000` | Connect-Timeout-Ms for streaming requests |
+| `FC_REPO_MAP_MODE` | `bootstrap_hotspot` | Repo map strategy (`classic` or `bootstrap_hotspot`) |
+| `FC_BOOTSTRAP_TREE_DEPTH` | `1` | Bootstrap mini-tree depth |
+| `FC_HOTSPOT_TOP_K` | `4` | Max hotspot top-level dirs in optimized repo map |
+| `FC_HOTSPOT_TREE_DEPTH` | `2` | Tree depth for each hotspot subtree |
+| `FC_HOTSPOT_MAX_BYTES` | `122880` | Max bytes budget for optimized repo map |
+| `FC_BOOTSTRAP_ENABLED` | `true` | Enable standalone bootstrap phase |
+| `FC_BOOTSTRAP_MAX_TURNS` | `2` | Bootstrap phase turns |
+| `FC_BOOTSTRAP_MAX_COMMANDS` | `6` | Bootstrap commands per turn |
 | `FC_RESULT_MAX_LINES` | `50` | Max lines per command output (truncation) |
 | `FC_LINE_MAX_CHARS` | `250` | Max characters per output line (truncation) |
 | `WS_MODEL` | `MODEL_SWE_1_6_FAST` | Windsurf model name |
@@ -131,9 +139,18 @@ AI-driven semantic code search with tunable parameters.
 |-----------|------|----------|---------|-------------|
 | `query` | string | Yes | — | Natural language search query |
 | `project_path` | string | No | cwd | Absolute path to project root |
-| `tree_depth` | integer | No | `3` | Directory tree depth for repo map (1-6). Higher = more context but larger payload. Auto falls back to lower depth if tree exceeds 250KB. Use 1-2 for huge monorepos (>5000 files), 3 for most projects, 4-6 for small projects. |
-| `max_turns` | integer | No | `3` | Search rounds (1-5). More = deeper search but slower. Use 1-2 for simple lookups, 3 for most queries, 4-5 for complex analysis. |
-| `max_results` | integer | No | `10` | Maximum number of files to return (1-30). Smaller = more focused, larger = broader exploration. |
+| `tree_depth` | integer | No | `3` | Main-phase repo map depth (`0-6`, `0=auto`). Higher = more structure context but larger payload. |
+| `max_turns` | integer | No | `3` | Main-phase search rounds (`1-5`). More = deeper search but slower. |
+| `max_results` | integer | No | `10` | Maximum number of files to return (`1-30`). |
+| `exclude_paths` | string[] | No | `[]` | Extra exclude patterns merged with built-in default excludes (`node_modules`, `.git`, `dist`, `build`, `coverage`, `.venv`, ...). |
+| `repo_map_mode` | enum | No | `bootstrap_hotspot` | Repo map strategy: `classic` or `bootstrap_hotspot`. |
+| `bootstrap_tree_depth` | integer | No | `1` | Bootstrap phase mini-tree depth (`1-3`). |
+| `hotspot_top_k` | integer | No | `4` | Number of hotspot top-level directories appended to repo map (`0-8`). |
+| `hotspot_tree_depth` | integer | No | `2` | Tree depth per hotspot subtree (`1-4`). |
+| `hotspot_max_bytes` | integer | No | `122880` | Max byte budget for optimized repo map (`16384-262144`). |
+| `bootstrap_enabled` | boolean | No | `true` | Enable standalone bootstrap phase before main search. |
+| `bootstrap_max_turns` | integer | No | `2` | Bootstrap turns (`1-3`). Independent from `max_turns`. |
+| `bootstrap_max_commands` | integer | No | `6` | Bootstrap commands per turn (`1-8`). Independent from main commands. |
 
 Returns:
 1. **Relevant files** with line ranges

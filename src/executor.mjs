@@ -285,14 +285,20 @@ export class ToolExecutor {
       const opts = {};
       if (levels) opts.maxDepth = levels;
       let stdout = treeNodeCli(rp, opts);
-      // tree-node-cli outputs basename as root line; replace with virtual path
+      // Two-step normalization:
+      // 1. _remap: replace absolute project root with /codebase globally
+      stdout = this._remap(stdout);
+      // 2. Handle basename root line: tree-node-cli outputs the directory
+      //    basename as the first line (e.g. "supabase"), which _remap won't
+      //    catch since it's not the full absolute path. Replace with the
+      //    virtual path the AI requested (already /codebase/...).
       const dirName = rp.split("/").pop() || rp.split("\\").pop() || rp;
       const lines = stdout.split("\n");
       if (lines[0] === dirName) {
         lines[0] = path;
         stdout = lines.join("\n");
       }
-      return ToolExecutor._truncate(this._remap(stdout));
+      return ToolExecutor._truncate(stdout);
     } catch {
       return `Error: failed to generate tree for ${path}`;
     }

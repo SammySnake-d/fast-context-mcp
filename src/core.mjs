@@ -1174,6 +1174,18 @@ function _suggestTreeDepth(projectRoot) {
   return 2;
 }
 
+function _normalizeTreeRoot(treeStr, absRoot, virtualRoot = "/codebase") {
+  const rootPattern = new RegExp(absRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
+  let out = String(treeStr || "").replace(rootPattern, virtualRoot);
+  const lines = out.split("\n");
+  const dirName = absRoot.split("/").pop() || absRoot.split("\\").pop() || absRoot;
+  if (lines[0] === dirName) {
+    lines[0] = virtualRoot;
+    out = lines.join("\n");
+  }
+  return out;
+}
+
 /**
  * Get a directory tree of the project with adaptive depth fallback.
  *
@@ -1191,8 +1203,6 @@ function getRepoMap(projectRoot, targetDepth = 3, excludePaths = []) {
   if (autoDepth) {
     targetDepth = _suggestTreeDepth(projectRoot);
   }
-  const rootPattern = new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
-  const dirName = projectRoot.split("/").pop() || projectRoot.split("\\").pop() || projectRoot;
   const excludeRegexes = excludePaths.length ? excludePaths.map(_excludePatternToRegex) : [];
 
   for (let L = targetDepth; L >= 1; L--) {
@@ -1200,14 +1210,8 @@ function getRepoMap(projectRoot, targetDepth = 3, excludePaths = []) {
       const opts = { maxDepth: L };
       if (excludeRegexes.length) opts.exclude = excludeRegexes;
       const stdout = treeNodeCli(projectRoot, opts);
-      // tree-node-cli outputs basename as root line; replace with /codebase
-      let treeStr = stdout.replace(rootPattern, "/codebase");
-      // Also replace the basename root line (first line) if full path wasn't matched
-      const lines = treeStr.split("\n");
-      if (lines[0] === dirName) {
-        lines[0] = "/codebase";
-        treeStr = lines.join("\n");
-      }
+      // Normalize root to /codebase consistently.
+      let treeStr = _normalizeTreeRoot(stdout, projectRoot, "/codebase");
       const sizeBytes = Buffer.byteLength(treeStr, "utf-8");
 
       if (sizeBytes <= MAX_TREE_BYTES) {
@@ -1284,10 +1288,7 @@ function _buildSubtreeForDir(projectRoot, dir, levels = 2) {
   const vRoot = `/codebase/${dir}`;
   try {
     const stdout = treeNodeCli(abs, { maxDepth: levels });
-    const dirName = abs.split("/").pop() || abs.split("\\").pop() || abs;
-    const lines = stdout.split("\n");
-    if (lines[0] === dirName) lines[0] = vRoot;
-    return lines.join("\n");
+    return _normalizeTreeRoot(stdout, abs, vRoot);
   } catch {
     return `${vRoot}\n  (failed to generate subtree)`;
   }

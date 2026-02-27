@@ -408,9 +408,7 @@ function probeGrep(projectRoot, topDirs, probeTerms, excludePaths = []) {
       "-l", // List matching files only
       "--hidden",
       "-g", `!{${[...excludeSet].join(",")}}`,
-      "-g", "*.ts", "-g", "*.tsx", "-g", "*.js", "-g", "*.jsx",
-      "-g", "*.py", "-g", "*.go", "-g", "*.rs", "-g", "*.java",
-      "-g", "*.md", "-g", "*.mdx", "-g", "*.json",
+      // No extension filter - let ripgrep search all text files
       pattern,
       projectRoot,
     ], {

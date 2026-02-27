@@ -1,6 +1,6 @@
 {
   "name": "@sammysnake/fast-context-mcp",
-  "version": "1.3.0-beta.1",
+  "version": "1.3.0-beta.2",
   "description": "AI-driven semantic code search via reverse-engineered Windsurf protocol (Node.js)",
   "type": "module",
   "main": "src/server.mjs",

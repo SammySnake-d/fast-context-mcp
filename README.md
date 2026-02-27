@@ -15,12 +15,15 @@ You: "where is the authentication logic?"
 │  (local MCP server)     │
 │                         │
 │  1. Maps project → /codebase
-│  2. Sends query to Windsurf Devstral API
-│  3. AI generates rg/readfile/tree commands
-│  4. Executes commands locally (built-in rg)
-│  5. Returns results to AI
-│  6. Repeats for N rounds
-│  7. Returns file paths + line ranges
+│  2. BM25F + Probe + Git RFM scoring
+│     → identifies hotspot directories
+│  3. Sends query + optimized repo map
+│     to Windsurf Devstral API
+│  4. AI generates rg/readfile/tree commands
+│  5. Executes commands locally (built-in rg)
+│  6. Returns results to AI
+│  7. Repeats for N rounds
+│  8. Returns file paths + line ranges
 │     + suggested search keywords
 └─────────────────────────┘
          │
@@ -109,7 +112,7 @@ Add to `claude_desktop_config.json` under `mcpServers`:
 | `FC_TIMEOUT_MS` | `30000` | Connect-Timeout-Ms for streaming requests |
 | `FC_REPO_MAP_MODE` | `bootstrap_hotspot` | Repo map strategy (`classic` or `bootstrap_hotspot`) |
 | `FC_BOOTSTRAP_TREE_DEPTH` | `1` | Bootstrap mini-tree depth |
-| `FC_HOTSPOT_TOP_K` | `4` | Max hotspot top-level dirs in optimized repo map |
+| `FC_HOTSPOT_TOP_K` | `4` | Base hotspot top-level dirs (dynamic scaling applies for flat repos) |
 | `FC_HOTSPOT_TREE_DEPTH` | `2` | Tree depth for each hotspot subtree |
 | `FC_HOTSPOT_MAX_BYTES` | `122880` | Max bytes budget for optimized repo map |
 | `FC_BOOTSTRAP_ENABLED` | `true` | Enable standalone bootstrap phase |
@@ -117,6 +120,8 @@ Add to `claude_desktop_config.json` under `mcpServers`:
 | `FC_BOOTSTRAP_MAX_COMMANDS` | `6` | Bootstrap commands per turn |
 | `FC_RESULT_MAX_LINES` | `50` | Max lines per command output (truncation) |
 | `FC_LINE_MAX_CHARS` | `250` | Max characters per output line (truncation) |
+| `FC_PROFILE_CACHE_TTL` | `120` | Directory profile cache TTL in seconds |
+| `FC_GIT_CACHE_TTL` | `300` | Git RFM analysis cache TTL in seconds |
 | `WS_MODEL` | `MODEL_SWE_1_6_FAST` | Windsurf model name |
 | `WS_APP_VER` | `1.48.2` | Windsurf app version (protocol metadata) |
 | `WS_LS_VER` | `1.9544.35` | Windsurf language server version (protocol metadata) |
@@ -195,11 +200,12 @@ Extract Windsurf API Key from local installation. No parameters.
 fast-context-mcp/
 ├── package.json
 ├── src/
-│   ├── server.mjs        # MCP server entry point
-│   ├── core.mjs          # Auth, message building, streaming, search loop
-│   ├── executor.mjs      # Tool executor: rg, readfile, tree, ls, glob
-│   ├── extract-key.mjs   # Windsurf API Key extraction (SQLite)
-│   └── protobuf.mjs      # Protobuf encoder/decoder + Connect-RPC frames
+│   ├── server.mjs           # MCP server entry point
+│   ├── core.mjs             # Auth, message building, streaming, search loop
+│   ├── executor.mjs         # Tool executor: rg, readfile, tree, ls, glob
+│   ├── directory-scorer.mjs # BM25F + Probe + Git RFM directory scoring
+│   ├── extract-key.mjs      # Windsurf API Key extraction (SQLite)
+│   └── protobuf.mjs         # Protobuf encoder/decoder + Connect-RPC frames
 ├── README.md
 └── LICENSE
 ```
@@ -207,14 +213,32 @@ fast-context-mcp/
 ## How the Search Works
 
 1. Project directory is mapped to virtual `/codebase` path
-2. Directory tree generated at requested depth (default L=3), with **automatic fallback** to lower depth if tree exceeds 250KB
-3. Query + directory tree sent to Windsurf's Devstral model via Connect-RPC/Protobuf
-4. Devstral generates tool commands (ripgrep, file reads, tree, ls, glob)
-5. Commands executed locally in parallel (up to `FC_MAX_COMMANDS` per round)
-6. Results sent back to Devstral for the next round
-7. After `max_turns` rounds, Devstral returns file paths + line ranges
-8. All rg patterns used during search are collected as suggested keywords
-9. Diagnostic metadata appended to help the calling AI tune parameters
+2. **Directory scoring** via 5-signal RRF fusion:
+   - **BM25F**: multi-field scoring (dir name, file paths, metadata, headers)
+   - **Probe grep**: single ripgrep call with regex alternation for content matching
+   - **Bootstrap keywords**: terms from optional bootstrap pre-scan
+   - **Git RFM**: Recency-Frequency-Modification model from git history
+   - **File aggregation**: file-level Log-Sum scoring per directory
+3. **Dynamic hotspot selection**: topK scales with repo size (flat repos with 30+ dirs get more coverage). Strong-signal dirs beyond topK are also included.
+4. **Path spine extraction**: scored file paths as navigation hints, with source-code path boost and noise path penalty
+5. Query + optimized repo map (tree + hotspot subtrees + path spines) sent to Windsurf Devstral via Connect-RPC/Protobuf
+6. Devstral generates tool commands (ripgrep, file reads, tree, ls, glob)
+7. Commands executed locally in parallel (up to `FC_MAX_COMMANDS` per round)
+8. Results sent back to Devstral for the next round
+9. After `max_turns` rounds, Devstral returns file paths + line ranges
+10. All rg patterns used during search are collected as suggested keywords
+11. Diagnostic metadata appended to help the calling AI tune parameters
+
+### Caching
+
+Directory profiles and Git history analysis are cached at the process level to avoid redundant filesystem walks across repeated queries:
+
+| Cache | TTL | Configurable via |
+|-------|-----|------------------|
+| Directory profiles | 120s | `FC_PROFILE_CACHE_TTL` |
+| Git RFM analysis | 300s | `FC_GIT_CACHE_TTL` |
+
+Caches are scoped to the MCP server process lifetime and automatically expire. No manual invalidation needed for normal development workflows.
 
 ## Technical Details
 

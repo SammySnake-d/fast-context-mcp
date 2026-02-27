@@ -26,6 +26,7 @@ import {
 } from "./protobuf.mjs";
 import { ToolExecutor } from "./executor.mjs";
 import { extractKey } from "./extract-key.mjs";
+import { scoreDirectories, tokenize as tokenizeBM25 } from "./directory-scorer.mjs";
 
 // ─── Error Classification ──────────────────────────────────
 
@@ -1300,7 +1301,9 @@ function buildOptimizedRepoMap({
   excludePaths,
   optimizer = {},
   bootstrapHints = null,
+  onProgress = null,
 }) {
+  const log = (msg) => onProgress?.(msg);
   const cfg = { ...REPO_MAP_OPTIMIZER_DEFAULTS, ...(optimizer || {}) };
   if (cfg.mode === "classic") {
     const base = getRepoMap(projectRoot, treeDepth, excludePaths);
@@ -1317,44 +1320,91 @@ function buildOptimizedRepoMap({
   const maxBytes = Math.max(16 * 1024, Number(cfg.maxBytes) || REPO_MAP_OPTIMIZER_DEFAULTS.maxBytes);
 
   const bootstrap = getRepoMap(projectRoot, bootstrapDepth, excludePaths);
-  const queryTokens = _tokenizeQuery(query);
   const topDirs = _listTopLevelDirs(projectRoot, excludePaths);
 
-  const scored = topDirs
-    .map((d) => ({ dir: d, score: _scoreTopLevelDir(d, queryTokens) }))
-    .sort((a, b) => b.score - a.score || a.dir.localeCompare(b.dir));
+  // Extract keywords from bootstrap hints (rgPatterns)
+  const keywords = bootstrapHints?.rgPatterns || [];
 
-  if (bootstrapHints && Array.isArray(bootstrapHints.hotDirs) && bootstrapHints.hotDirs.length) {
-    const hintSet = new Set(bootstrapHints.hotDirs.map((d) => String(d).toLowerCase()));
-    for (const s of scored) {
-      if (hintSet.has(String(s.dir).toLowerCase())) s.score += 6;
-    }
-    scored.sort((a, b) => b.score - a.score || a.dir.localeCompare(b.dir));
+  // Use BM25F + Probe + RRF for directory scoring
+  // This replaces the old token-based scoring + commonRoots approach
+  let hotDirs = [];
+  let pathSpines = [];
+  try {
+    const results = scoreDirectories(query, projectRoot, topDirs, excludePaths, {
+      topK: hotspotTopK,
+      useProbe: true, // Enable probe grep signal
+      keywords, // Bootstrap keywords
+      minReturn: 2, // Always return at least 2 directories for coverage
+    });
+    hotDirs = results.hotDirs;
+    pathSpines = results.pathSpines;
+    log(`BM25F scoring: hotDirs=[${hotDirs.join(",")}] pathSpines=${pathSpines.length} signals=${JSON.stringify(results.signals)}`);
+  } catch (e) {
+    // Lightweight fallback: use quick scoring without commonRoots
+    log(`BM25F failed, using quick token scoring: ${e.message}`);
+    const queryTerms = tokenizeBM25(query);
+    const scored = topDirs.map((d) => {
+      const dirTerms = tokenizeBM25(d);
+      let score = 0;
+      for (const qt of queryTerms) {
+        if (dirTerms.some(dt => dt.includes(qt) || qt.includes(dt))) score += 1;
+      }
+      return { dir: d, score };
+    }).sort((a, b) => b.score - a.score);
+
+    // Always return at least topK directories (no score > 0 filter)
+    hotDirs = scored.slice(0, hotspotTopK).map((x) => x.dir);
+    if (hotDirs.length === 0) hotDirs = topDirs.slice(0, hotspotTopK);
+    log(`Quick scoring fallback: ${hotDirs.join(",")}`);
   }
-
-  const hotDirs = scored.filter((x) => x.score > 0).slice(0, hotspotTopK).map((x) => x.dir);
 
   const hotspotSections = [];
   for (const d of hotDirs) {
     hotspotSections.push(_buildSubtreeForDir(projectRoot, d, hotspotTreeDepth));
   }
 
+  // Build path spines section for deep file visibility
+  const pathSpineSection = pathSpines.length > 0
+    ? "# Relevant File Paths (from BM25F path spine extraction)\n" + pathSpines.map(p => `- /codebase/${p}`).join("\n")
+    : "";
+
   let tree = bootstrap.tree;
+  const sections = [];
   if (hotspotSections.length) {
-    tree = `${bootstrap.tree}\n\n# Hotspot Subtrees\n${hotspotSections.join("\n\n")}`;
+    sections.push("# Hotspot Subtrees\n" + hotspotSections.join("\n\n"));
+  }
+  if (pathSpineSection) {
+    sections.push(pathSpineSection);
+  }
+  if (sections.length) {
+    tree = `${bootstrap.tree}\n\n${sections.join("\n\n")}`;
   }
 
   // Keep map under configurable budget.
   let sizeBytes = Buffer.byteLength(tree, "utf-8");
-  if (sizeBytes > maxBytes && hotspotSections.length) {
-    let kept = [...hotspotSections];
-    while (kept.length > 0) {
-      kept.pop();
-      tree = kept.length
-        ? `${bootstrap.tree}\n\n# Hotspot Subtrees\n${kept.join("\n\n")}`
+  if (sizeBytes > maxBytes && (hotspotSections.length || pathSpineSection)) {
+    // First try removing path spines
+    if (pathSpineSection) {
+      const withoutSpines = sections.length > 1
+        ? `${bootstrap.tree}\n\n${sections[0]}`
         : bootstrap.tree;
-      sizeBytes = Buffer.byteLength(tree, "utf-8");
-      if (sizeBytes <= maxBytes) break;
+      sizeBytes = Buffer.byteLength(withoutSpines, "utf-8");
+      if (sizeBytes <= maxBytes) {
+        tree = withoutSpines;
+      }
+    }
+
+    // If still too large, progressively remove hotspot sections
+    if (sizeBytes > maxBytes && hotspotSections.length) {
+      let kept = [...hotspotSections];
+      while (kept.length > 0) {
+        kept.pop();
+        tree = kept.length
+          ? `${bootstrap.tree}\n\n# Hotspot Subtrees\n${kept.join("\n\n")}`
+          : bootstrap.tree;
+        sizeBytes = Buffer.byteLength(tree, "utf-8");
+        if (sizeBytes <= maxBytes) break;
+      }
     }
   }
 
@@ -1495,6 +1545,7 @@ export async function search({
       maxBytes: hotspotMaxBytes,
     },
     bootstrapHints,
+    onProgress,
   });
   log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}${autoDepth ? " [auto]" : ""} [strategy=${repoMapStrategy}]${hotDirs.length ? ` [hot=${hotDirs.join(",")}]` : ""}`);
   const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;

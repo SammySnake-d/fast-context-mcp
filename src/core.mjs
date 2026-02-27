@@ -83,23 +83,15 @@ const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
 const DEBUG_MODE = process.env.FAST_CONTEXT_DEBUG === "1" || process.env.FAST_CONTEXT_DEBUG === "true";
 
 // Default excludes aligned with Windsurf fast-search guidance.
+// Minimal defaults — only dirs that are almost never source code.
+// Users can add more via the exclude_paths parameter.
 const DEFAULT_EXCLUDE_PATHS = [
   "node_modules",
   ".git",
-  "dist",
-  "build",
-  "coverage",
+  "__pycache__",
   ".venv",
   "venv",
-  "target",
-  "out",
-  ".cache",
-  "__pycache__",
-  "vendor",
-  "deps",
-  "third_party",
-  "logs",
-  "data",
+  "dist",
   "*.min.*",
 ];
 

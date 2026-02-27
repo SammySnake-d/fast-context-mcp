@@ -54,6 +54,18 @@ No need to install ripgrep — it's bundled via `@vscode/ripgrep`.
 
 ## Installation
 
+### Option 1: npm (Recommended)
+
+```bash
+# Latest stable release
+npm install @sammysnake/fast-context-mcp
+
+# Or beta/next release
+npm install @sammysnake/fast-context-mcp@next
+```
+
+### Option 2: From Source
+
 ```bash
 git clone https://github.com/SammySnake-d/fast-context-mcp.git
 cd fast-context-mcp
@@ -83,8 +95,22 @@ Add to `~/.claude.json` under `mcpServers`:
 ```json
 {
   "fast-context": {
-    "command": "node",
-    "args": ["/absolute/path/to/fast-context-mcp/src/server.mjs"],
+    "command": "npx",
+    "args": ["-y", "--prefer-online", "@sammysnake/fast-context-mcp"],
+    "env": {
+      "WINDSURF_API_KEY": "sk-ws-01-xxxxx"
+    }
+  }
+}
+```
+
+For beta/next release:
+
+```json
+{
+  "fast-context": {
+    "command": "npx",
+    "args": ["-y", "--prefer-online", "@sammysnake/fast-context-mcp@next"],
     "env": {
       "WINDSURF_API_KEY": "sk-ws-01-xxxxx"
     }
@@ -99,8 +125,22 @@ Add to `claude_desktop_config.json` under `mcpServers`:
 ```json
 {
   "fast-context": {
-    "command": "node",
-    "args": ["/absolute/path/to/fast-context-mcp/src/server.mjs"],
+    "command": "npx",
+    "args": ["-y", "--prefer-online", "@sammysnake/fast-context-mcp"],
+    "env": {
+      "WINDSURF_API_KEY": "sk-ws-01-xxxxx"
+    }
+  }
+}
+```
+
+For beta/next release:
+
+```json
+{
+  "fast-context": {
+    "command": "npx",
+    "args": ["-y", "--prefer-online", "@sammysnake/fast-context-mcp@next"],
     "env": {
       "WINDSURF_API_KEY": "sk-ws-01-xxxxx"
     }

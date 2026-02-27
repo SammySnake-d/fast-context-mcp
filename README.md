@@ -10,28 +10,36 @@ Any MCP-compatible client (Claude Code, Claude Desktop, Cursor, etc.) can use th
 You: "where is the authentication logic?"
          │
          ▼
-┌─────────────────────────┐
-│  Fast Context MCP       │
-│  (local MCP server)     │
-│                         │
-│  1. Maps project → /codebase
-│  2. BM25F + Probe + Git RFM scoring
-│     → identifies hotspot directories
-│  3. Sends query + optimized repo map
-│     to Windsurf Devstral API
-│  4. AI generates rg/readfile/tree commands
-│  5. Executes commands locally (built-in rg)
-│  6. Returns results to AI
-│  7. Repeats for N rounds
-│  8. Returns file paths + line ranges
-│     + suggested search keywords
-└─────────────────────────┘
+┌──────────────────────────────────────────────────────┐
+│  Fast Context MCP (local MCP server)                 │
+│                                                      │
+│  Phase 1: Bootstrap (optional)                       │
+│    1. Mini-tree scan → Devstral API                  │
+│    2. Returns hot directories + rg patterns          │
+│                                                      │
+│  Phase 2: Directory Scoring                          │
+│    3. BM25F + Probe grep + Git RFM + File Agg       │
+│    4. RRF fusion → adaptive topK selection           │
+│       (Kneedle gap + entropy + tail threshold)       │
+│    5. Path spine extraction (scored file hints)      │
+│                                                      │
+│  Phase 3: Main Search (N rounds)                     │
+│    6. Query + optimized repo map → Devstral API      │
+│       (tree + hotspot subtrees + path spines)        │
+│    7. AI generates rg/readfile/tree/ls commands      │
+│    8. Execute locally (built-in rg) → return results │
+│    9. Repeat for N rounds                            │
+│   10. Final answer: file paths + line ranges         │
+│       + suggested search keywords                    │
+└──────────────────────────────────────────────────────┘
          │
          ▼
-Found 3 relevant files.
-  [1/3] /project/src/auth/handler.py (L10-60)
-  [2/3] /project/src/middleware/jwt.py (L1-40)
-  [3/3] /project/src/models/user.py (L20-80)
+Found 5 relevant files.
+  [1/5] /project/src/auth/handler.py (L10-60)
+  [2/5] /project/src/middleware/jwt.py (L1-40)
+  [3/5] /project/src/models/user.py (L20-80)
+  [4/5] /project/src/routes/login.py (L5-35)
+  [5/5] /project/src/utils/token.py (L1-25)
 
 Suggested search keywords:
   authenticate, jwt.*verify, session.*token
@@ -112,7 +120,7 @@ Add to `claude_desktop_config.json` under `mcpServers`:
 | `FC_TIMEOUT_MS` | `30000` | Connect-Timeout-Ms for streaming requests |
 | `FC_REPO_MAP_MODE` | `bootstrap_hotspot` | Repo map strategy (`classic` or `bootstrap_hotspot`) |
 | `FC_BOOTSTRAP_TREE_DEPTH` | `1` | Bootstrap mini-tree depth |
-| `FC_HOTSPOT_TOP_K` | `4` | Base hotspot top-level dirs (dynamic scaling applies for flat repos) |
+| `FC_HOTSPOT_TOP_K` | `4` | Base hotspot dirs (adaptive topK overrides via Kneedle + entropy) |
 | `FC_HOTSPOT_TREE_DEPTH` | `2` | Tree depth for each hotspot subtree |
 | `FC_HOTSPOT_MAX_BYTES` | `122880` | Max bytes budget for optimized repo map |
 | `FC_BOOTSTRAP_ENABLED` | `true` | Enable standalone bootstrap phase |
@@ -150,7 +158,7 @@ AI-driven semantic code search with tunable parameters.
 | `exclude_paths` | string[] | No | `[]` | Extra exclude patterns merged with built-in default excludes (`node_modules`, `.git`, `dist`, `build`, `coverage`, `.venv`, ...). |
 | `repo_map_mode` | enum | No | `bootstrap_hotspot` | Repo map strategy: `classic` or `bootstrap_hotspot`. |
 | `bootstrap_tree_depth` | integer | No | `1` | Bootstrap phase mini-tree depth (`1-3`). |
-| `hotspot_top_k` | integer | No | `4` | Number of hotspot top-level directories appended to repo map (`0-8`). |
+| `hotspot_top_k` | integer | No | `4` | Base hotspot dirs (`0-8`). Adaptive topK may expand this based on score distribution. |
 | `hotspot_tree_depth` | integer | No | `2` | Tree depth per hotspot subtree (`1-4`). |
 | `hotspot_max_bytes` | integer | No | `122880` | Max byte budget for optimized repo map (`16384-262144`). |
 | `bootstrap_enabled` | boolean | No | `true` | Enable standalone bootstrap phase before main search. |
@@ -219,7 +227,10 @@ fast-context-mcp/
    - **Bootstrap keywords**: terms from optional bootstrap pre-scan
    - **Git RFM**: Recency-Frequency-Modification model from git history
    - **File aggregation**: file-level Log-Sum scoring per directory
-3. **Dynamic hotspot selection**: topK scales with repo size (flat repos with 30+ dirs get more coverage). Strong-signal dirs beyond topK are also included.
+3. **Adaptive hotspot selection** based on IR literature:
+   - **Kneedle gap detection** (Taguchi 2025 Adaptive-k): finds the largest score drop as a natural cutoff
+   - **Entropy scaling** (CMU Selective Search): flat score distributions auto-expand K; peaked distributions keep K tight
+   - **Adaptive tail threshold**: includes strong dirs beyond cutoff based on score decay rate (replaces fixed 0.6 ratio)
 4. **Path spine extraction**: scored file paths as navigation hints, with source-code path boost and noise path penalty
 5. Query + optimized repo map (tree + hotspot subtrees + path spines) sent to Windsurf Devstral via Connect-RPC/Protobuf
 6. Devstral generates tool commands (ripgrep, file reads, tree, ls, glob)
@@ -255,7 +266,7 @@ Caches are scoped to the MCP server process lifetime and automatically expire. N
 | `@modelcontextprotocol/sdk` | MCP server framework |
 | `@vscode/ripgrep` | Bundled ripgrep binary (cross-platform) |
 | `tree-node-cli` | Cross-platform directory tree (replaces system `tree`) |
-| `better-sqlite3` | Read Windsurf's local SQLite DB |
+| `sql.js` | Read Windsurf's local SQLite DB (WASM, no native deps) |
 | `zod` | Schema validation (MCP SDK requirement) |
 
 ## License

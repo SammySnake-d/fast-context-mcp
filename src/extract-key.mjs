@@ -48,7 +48,7 @@ export function getDbPathCandidates(opts = {}) {
   }
 
   const config = env.XDG_CONFIG_HOME || join(home, ".config");
-  return ["Deviv", "Windsurf"].map((appName) =>
+  return ["Devin", "Windsurf"].map((appName) =>
     join(config, appName, "User", "globalStorage", "state.vscdb")
   );
 }

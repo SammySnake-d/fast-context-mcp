@@ -4,12 +4,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { _parseToolCall } from "../deepgrep/src/core.mjs";
+import { _parseToolCall } from "../src/core.mjs";
 import {
   parseJsonWithRepair,
   salvageRestrictedExecArgs,
   salvageSearchEvidence,
-} from "../deepgrep/src/response-repair.mjs";
+} from "../src/response-repair.mjs";
 
 describe("malformed restricted_exec response repair", () => {
   it("repairs a missing opening quote on a key and trailing commas", () => {

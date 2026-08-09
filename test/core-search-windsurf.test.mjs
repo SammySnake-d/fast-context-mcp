@@ -4,12 +4,12 @@
  * Notes:
  * - This machine has Windsurf installed, so getApiKey() always finds credentials.
  * - Tests use mocked fetch to control behavior without real network calls.
- * - Happy path (full protobuf streaming) is tested indirectly via openai-backend tests.
+ * - These tests focus on credential discovery and deterministic error handling.
  */
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { search, searchWithContent, extractKeyInfo } from "../deepgrep/src/core.mjs";
+import { search, searchWithContent, extractKeyInfo } from "../src/core.mjs";
 import { setEnv } from "./helpers/env.mjs";
 
 describe("search() — mocked fetch timeout", () => {

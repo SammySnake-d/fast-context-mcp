@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildCacheKey, getCachedResult, setCachedResult, clearCache, computeMtimeHash } from "../deepgrep/src/cache.mjs";
+import { buildCacheKey, getCachedResult, setCachedResult, clearCache, computeMtimeHash } from "../src/cache.mjs";
 
 describe("buildCacheKey", () => {
   it("produces deterministic 64-char hex", () => {
@@ -37,9 +37,6 @@ describe("getCachedResult / setCachedResult", () => {
     delete process.env.FC_CACHE_DISABLED;
     delete process.env.FC_CACHE_TTL_MS;
     delete process.env.FC_CACHE_MAX_ENTRIES;
-    delete process.env.DEEPGREP_CACHE_DISABLED;
-    delete process.env.DEEPGREP_CACHE_TTL_MS;
-    delete process.env.DEEPGREP_CACHE_MAX_ENTRIES;
   });
 
   it("returns null on miss", () => {
@@ -68,34 +65,6 @@ describe("getCachedResult / setCachedResult", () => {
     process.env.FC_CACHE_TTL_MS = "0";
     setCachedResult("k", { a: 1 });
     assert.equal(getCachedResult("k"), null);
-  });
-
-  it("DEEPGREP_CACHE_DISABLED=true disables (new env name)", () => {
-    process.env.DEEPGREP_CACHE_DISABLED = "true";
-    setCachedResult("k", { a: 1 });
-    assert.equal(getCachedResult("k"), null);
-  });
-
-  it("DEEPGREP_CACHE_DISABLED takes precedence over legacy FC_CACHE_DISABLED", () => {
-    process.env.DEEPGREP_CACHE_DISABLED = "true";
-    process.env.FC_CACHE_DISABLED = "false";
-    setCachedResult("k", { a: 1 });
-    assert.equal(getCachedResult("k"), null);
-  });
-
-  it("DEEPGREP_CACHE_TTL_MS=0 disables (new env name)", () => {
-    process.env.DEEPGREP_CACHE_TTL_MS = "0";
-    setCachedResult("k", { a: 1 });
-    assert.equal(getCachedResult("k"), null);
-  });
-
-  it("DEEPGREP_CACHE_MAX_ENTRIES caps entries (new env name)", () => {
-    process.env.DEEPGREP_CACHE_MAX_ENTRIES = "2";
-    setCachedResult("a", { n: 1 });
-    setCachedResult("b", { n: 2 });
-    setCachedResult("c", { n: 3 });
-    assert.equal(getCachedResult("a"), null);
-    assert.notEqual(getCachedResult("c"), null);
   });
 
   it("TTL expiry evicts entry", async () => {

@@ -1,5 +1,5 @@
 /**
- * deepgrep — core protocol implementation (Node.js).
+ * Fast Context MCP — core protocol implementation (Node.js).
  *
  * Reverse-engineered Windsurf SWE-grep Connect-RPC/Protobuf protocol
  * for standalone AI-driven semantic code search.
@@ -36,7 +36,6 @@ import {
   buildWindsurfPrompt,
 } from "./shared.mjs";
 import { buildCacheKey, getCachedResult, setCachedResult, computeMtimeHash } from "./cache.mjs";
-import { readSnippets } from "./snippets.mjs";
 
 // ─── Error Classification ──────────────────────────────────
 
@@ -292,7 +291,7 @@ function _applyTlsFallback() {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
     _tlsFallbackApplied = true;
     process.stderr.write(
-      "[deepgrep] WARNING: TLS certificate verification disabled (FC_ALLOW_INSECURE_TLS=1). " +
+      "[fast-context] WARNING: TLS certificate verification disabled (FC_ALLOW_INSECURE_TLS=1). " +
       "Remove this env var to restore secure defaults.\n"
     );
   }
@@ -694,7 +693,7 @@ function _parseResponse(data) {
 // are imported from shared.mjs
 
 /**
- * Execute deepgrep search.
+ * Execute Fast Context search.
  *
  * @param {Object} opts
  * @param {string} opts.query - Natural language search query
@@ -938,7 +937,6 @@ export async function searchWithContent({
   treeDepth = 3,
   timeoutMs = 30000,
   excludePaths = [],
-  includeSnippets = false,
 }) {
   const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, maxResults, treeDepth, timeoutMs, excludePaths });
 
@@ -989,25 +987,6 @@ export async function searchWithContent({
     }
   } else {
     parts.push("No files found.");
-  }
-
-  // Append code snippets if requested
-  if (includeSnippets && files.length) {
-    const snippetMap = readSnippets(files);
-    if (snippetMap.size) {
-      parts.push("");
-      parts.push("--- Code Snippets ---");
-      for (const file of files) {
-        const snippet = snippetMap.get(file.full_path);
-        if (snippet) {
-          parts.push("");
-          parts.push(`## ${file.path}`);
-          parts.push("```");
-          parts.push(snippet);
-          parts.push("```");
-        }
-      }
-    }
   }
 
   if (uniquePatterns.length) {

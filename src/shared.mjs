@@ -1,12 +1,11 @@
 /**
- * Shared utilities for deepgrep backends.
+ * Shared utilities for Fast Context search.
  *
  * Contains: getRepoMap, _parseAnswer, _excludePatternToRegex,
- * constants, and prompt builders for both Windsurf and OpenAI backends.
+ * constants, and the Windsurf prompt builder.
  */
 
 import { readdirSync } from "node:fs";
-import { resolve, relative, sep, isAbsolute } from "node:path";
 import treeNodeCli from "tree-node-cli";
 import { resolveWithinRoot } from "./path-safety.mjs";
 
@@ -18,10 +17,6 @@ export const MAX_TREE_BYTES = 250 * 1024;
 /** Injected after last effective search round to force an answer (Windsurf [TOOL_CALLS]/XML format) */
 export const FINAL_FORCE_ANSWER =
   "You have no turns left. Now you MUST provide your final ANSWER, even if it's not complete.";
-
-/** Force-answer nudge for the OpenAI backend (standard tool-calling protocol) */
-export const FINAL_FORCE_ANSWER_OPENAI =
-  "You have no turns left. Now you MUST call the answer tool with your final ANSWER.";
 
 // ─── Helpers ───────────────────────────────────────────────
 
@@ -139,20 +134,6 @@ export function _parseAnswer(xmlText, projectRoot) {
  */
 export function buildWindsurfPrompt(maxTurns = 3, maxCommands = 8, maxResults = 10) {
   return WINDSURF_PROMPT_TEMPLATE
-    .replaceAll("{max_turns}", String(maxTurns))
-    .replaceAll("{max_commands}", String(maxCommands))
-    .replaceAll("{max_results}", String(maxResults));
-}
-
-/**
- * Build the OpenAI system prompt (concise, standard tool_calls format).
- * @param {number} maxTurns
- * @param {number} maxCommands
- * @param {number} maxResults
- * @returns {string}
- */
-export function buildOpenAIPrompt(maxTurns = 3, maxCommands = 8, maxResults = 10) {
-  return OPENAI_PROMPT_TEMPLATE
     .replaceAll("{max_turns}", String(maxTurns))
     .replaceAll("{max_commands}", String(maxCommands))
     .replaceAll("{max_results}", String(maxResults));
@@ -307,96 +288,3 @@ to provide some output. An empty answer is always better than a misleading one.
 Aim to return at most {max_results} files in your answer. Focus on the most \
 relevant files first. If fewer files are relevant, return fewer.
 `;
-
-const OPENAI_PROMPT_TEMPLATE = `You are an expert software engineer, responsible for providing context \
-to another engineer to solve a code issue in the current codebase. \
-The user will present you with a description of the issue, and it is \
-your job to provide a series of file paths with associated line ranges \
-that contain ALL the information relevant to understand and correctly \
-address the issue.
-
-# IMPORTANT:
-- Include ENTIRE semantic blocks (functions, classes, definitions).
-- Minimize the number of files while covering all relevant context.
-- Start NARROW, then widen only if needed.
-
-# ENVIRONMENT
-- Working directory: /codebase
-- Use the restricted_exec tool to run commands (rg, readfile, tree, ls, glob)
-- Default EXCLUDES: node_modules, .git, dist, build, coverage, .venv, target, out, __pycache__, vendor
-
-# TOOL USE
-- Use restricted_exec with multiple commands per call (up to {max_commands}).
-- You have at most {max_turns} turns. Use them wisely.
-- Each command result is truncated to 50 lines.
-
-# ANSWER FORMAT
-When ready, call the "answer" tool with XML:
-<ANSWER>
-  <file path="/codebase/src/auth/handler.ts">
-    <range>10-60</range>
-  </file>
-</ANSWER>
-
-If no relevant files exist, return: <ANSWER></ANSWER>
-Aim to return at most {max_results} files.`;
-
-// ─── Error UX ──────────────────────────────────────────────
-
-/**
- * Parse a "reset after Xs" or "reset after Xm Ys" hint from a 429 error body.
- * @param {string} text
- * @returns {string|null} human-readable reset time, or null
- */
-function _parseResetHint(text) {
-  if (!text) return null;
-  const m = text.match(/reset after\s+(?:(\d+)m\s*)?(?:(\d+)s)?/i);
-  if (m && (m[1] || m[2])) {
-    const mins = parseInt(m[1] || "0", 10);
-    const secs = parseInt(m[2] || "0", 10);
-    if (mins === 0 && secs === 0) return null;
-    if (mins > 0) return `${mins}m ${secs}s`;
-    return `${secs}s`;
-  }
-  return null;
-}
-
-/**
- * Convert a raw API error into a user-friendly, actionable message.
- * Called AFTER retries are exhausted — do NOT say "retrying" here.
- *
- * @param {Error} err — error thrown from _callOpenAI (after retry exhaustion)
- * @param {string} model — model that failed
- * @returns {string} friendly message
- */
-export function friendlyError(err, model) {
-  const msg = err?.message || String(err);
-  const status = err?.status;
-
-  if (status === 429 || msg.includes("429")) {
-    const reset = _parseResetHint(msg);
-    const waitStr = reset ? ` or wait ${reset}` : "";
-    return (
-      `Model "${model}" rate limited after retries.` +
-      `\nTry: set DEEPGREP_MODEL=deep-search (uses combo routing with fallback)${waitStr}.` +
-      `\nAlternatively: cx/gpt-5.5 or kr/claude-sonnet-4.6`
-    );
-  }
-
-  if (status === 403 || msg.includes("403")) {
-    return (
-      `Model "${model}" is not accessible with this API key.` +
-      `\nTry: DEEPGREP_MODEL=deep-search or DEEPGREP_MODEL=cx/gpt-5.5`
-    );
-  }
-
-  if (status === 401 || msg.includes("401")) {
-    return (
-      `Authentication failed. Check your DEEPGREP_API_KEY.` +
-      `\nGet a free key at: https://deepgrep.chainlens.net`
-    );
-  }
-
-  // Generic fallback
-  return `Search failed: ${msg.slice(0, 150)}`;
-}

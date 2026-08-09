@@ -1,10 +1,10 @@
 /**
- * In-memory result cache with TTL for deepgrep search results.
+ * In-memory result cache with TTL for Fast Context search results.
  *
  * Env vars:
- *   DEEPGREP_CACHE_DISABLED  — "1"/"true"/"yes"/"on" disables caching entirely (legacy: FC_CACHE_DISABLED)
- *   DEEPGREP_CACHE_TTL_MS    — cache TTL in milliseconds (default: 300000 = 5 min; <=0 disables) (legacy: FC_CACHE_TTL_MS)
- *   DEEPGREP_CACHE_MAX_ENTRIES — max cached entries before oldest is evicted (default: 200) (legacy: FC_CACHE_MAX_ENTRIES)
+ *   FC_CACHE_DISABLED  — "1"/"true"/"yes"/"on" disables caching entirely
+ *   FC_CACHE_TTL_MS    — cache TTL in milliseconds (default: 300000 = 5 min; <=0 disables)
+ *   FC_CACHE_MAX_ENTRIES — max cached entries before oldest is evicted (default: 200)
  */
 
 import { createHash } from "node:crypto";
@@ -15,7 +15,7 @@ import { _excludePatternToRegex } from "./shared.mjs";
 // ─── Config ────────────────────────────────────────────────
 
 function _isDisabled() {
-  const v = (process.env.DEEPGREP_CACHE_DISABLED || process.env.FC_CACHE_DISABLED || "").trim().toLowerCase();
+  const v = (process.env.FC_CACHE_DISABLED || "").trim().toLowerCase();
   return v === "1" || v === "true" || v === "yes" || v === "on";
 }
 
@@ -25,7 +25,7 @@ function _isDisabled() {
  * @returns {number}
  */
 function _getTtlMs() {
-  const raw = process.env.DEEPGREP_CACHE_TTL_MS || process.env.FC_CACHE_TTL_MS;
+  const raw = process.env.FC_CACHE_TTL_MS;
   if (raw === undefined || raw.trim() === "") return 300000;
   const n = Number.parseInt(raw, 10);
   if (!Number.isFinite(n)) return 300000; // non-numeric → default
@@ -33,7 +33,7 @@ function _getTtlMs() {
 }
 
 function _getMaxEntries() {
-  const raw = process.env.DEEPGREP_CACHE_MAX_ENTRIES || process.env.FC_CACHE_MAX_ENTRIES;
+  const raw = process.env.FC_CACHE_MAX_ENTRIES;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n > 0 ? n : 200;
 }

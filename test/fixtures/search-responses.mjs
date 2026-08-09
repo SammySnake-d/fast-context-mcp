@@ -1,5 +1,5 @@
 /**
- * Test fixtures: sample search responses for deepgrep tests.
+ * Test fixtures: sample Fast Context search responses.
  *
  * Provides realistic mock data matching the actual response structures
  * returned by windsurf and openai backends.
@@ -42,7 +42,7 @@ export const EMPTY_SEARCH = {
 };
 
 /**
- * Search result from deep mode (openai backend).
+ * Sample structured search result.
  */
 export const DEEP_SEARCH_RESULT = {
   files: [

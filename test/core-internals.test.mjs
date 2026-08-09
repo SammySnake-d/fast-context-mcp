@@ -17,7 +17,7 @@ import {
 import {
   connectFrameEncode,
   ProtobufEncoder,
-} from "../deepgrep/src/protobuf.mjs";
+} from "../src/protobuf.mjs";
 
 // ─── stripInvalidUtf8 ─────────────────────────────────────
 

@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { _parseAnswer } from "../deepgrep/src/shared.mjs";
+import { _parseAnswer } from "../src/shared.mjs";
 
 const ROOT = process.cwd();
 

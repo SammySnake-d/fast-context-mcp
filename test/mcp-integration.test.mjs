@@ -1,10 +1,8 @@
 /**
  * MCP stdio integration test.
  *
- * Spawns the real server (deepgrep/src/server.mjs) as a child process and
- * communicates over the MCP stdio transport (newline-delimited JSON-RPC).
- * Verifies the full stack: initialize handshake, tools/list, and tools/call
- * for the pure-local deepgrep_get tool (no network needed).
+ * Spawns the real Fast Context server and verifies the public contract:
+ * initialize, tools/list, and a deterministic tools/call error path.
  */
 
 import { describe, it, before, after } from "node:test";
@@ -12,12 +10,8 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
-const SERVER_PATH = new URL("../deepgrep/src/server.mjs", import.meta.url).pathname;
+const SERVER_PATH = new URL("../src/server.mjs", import.meta.url).pathname;
 
-/**
- * Minimal MCP client over stdio. Sends newline-delimited JSON-RPC,
- * resolves responses by matching `id`.
- */
 class McpClient {
   constructor() {
     this.proc = spawn(process.execPath, [SERVER_PATH], {
@@ -79,52 +73,40 @@ describe("MCP stdio integration", () => {
   });
   after(() => client.close());
 
-  it("initialize returns serverInfo with name 'deepgrep'", async () => {
-    // re-init on a fresh client to assert handshake shape
+  it("initialize preserves the Fast Context server identity", async () => {
     const c = new McpClient();
     try {
       const res = await c.initialize();
-      assert.equal(res.jsonrpc, "2.0");
-      assert.equal(res.id, 1);
-      assert.equal(res.result?.serverInfo?.name, "deepgrep");
+      assert.equal(res.result?.serverInfo?.name, "windsurf-fast-context");
+      assert.equal(res.result?.serverInfo?.version, "1.3.1");
     } finally {
       c.close();
     }
   });
 
-  it("tools/list returns all 4 tools", async () => {
+  it("tools/list preserves the two public tool names", async () => {
     const res = await client.request(2, "tools/list");
-    const names = (res.result?.tools || []).map((t) => t.name).sort();
-    assert.deepEqual(names, ["deepgrep_deep", "deepgrep_get", "deepgrep_search", "deepgrep_status"]);
+    const names = (res.result?.tools || []).map((tool) => tool.name).sort();
+    assert.deepEqual(names, ["extract_windsurf_key", "fast_context_search"]);
   });
 
-  it("deepgrep_get returns formatted snippet with line numbers", async () => {
-    const res = await client.request(3, "tools/call", {
-      name: "deepgrep_get",
-      arguments: { files: [{ file: SERVER_PATH, ranges: [[1, 3]] }] },
-    });
-    const text = res.result?.content?.[0]?.text;
-    assert.ok(text, "expected content text");
-    assert.match(text, /## .+server\.mjs \(L1-3\)/);
-    assert.match(text, /1 \| /);
+  it("fast_context_search keeps the locator-only schema", async () => {
+    const res = await client.request(3, "tools/list");
+    const search = (res.result?.tools || []).find((tool) => tool.name === "fast_context_search");
+    assert.ok(search);
+    const properties = Object.keys(search.inputSchema?.properties || {}).sort();
+    assert.deepEqual(properties, ["exclude_paths", "max_results", "max_turns", "project_path", "query", "tree_depth"]);
   });
 
-  it("deepgrep_get with empty files returns 'No files/ranges provided'", async () => {
+  it("fast_context_search handles an invalid project without network access", async () => {
     const res = await client.request(4, "tools/call", {
-      name: "deepgrep_get",
-      arguments: { files: [] },
+      name: "fast_context_search",
+      arguments: {
+        query: "find auth",
+        project_path: "/definitely/not/a/real/fast-context-project",
+      },
     });
-    assert.equal(res.result?.content?.[0]?.text, "No files/ranges provided");
-  });
-
-  it("deepgrep_status returns a status report", async () => {
-    const res = await client.request(5, "tools/call", {
-      name: "deepgrep_status",
-      arguments: {},
-    }, 15000);
     const text = res.result?.content?.[0]?.text;
-    assert.ok(text, "expected status text");
-    assert.match(text, /deepgrep status/i);
+    assert.match(text, /^Error: project path does not exist:/);
   });
 });
-

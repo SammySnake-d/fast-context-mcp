@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getRepoMap, MAX_TREE_BYTES } from "../deepgrep/src/shared.mjs";
+import { getRepoMap, MAX_TREE_BYTES } from "../src/shared.mjs";
 import { createMinimalNodeProject, createDeepProject } from "./helpers/test-project.mjs";
 
 describe("getRepoMap — with test projects", () => {

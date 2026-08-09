@@ -5,7 +5,7 @@ import {
   getDbPathCandidates,
   extractApiKeyFromToml,
   extractKey,
-} from "../deepgrep/src/extract-key.mjs";
+} from "../src/extract-key.mjs";
 
 describe("getDbPath", () => {
   it("returns a string path", () => {

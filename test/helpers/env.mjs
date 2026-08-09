@@ -13,7 +13,7 @@
  * @returns {{ restore: () => void }}
  *
  * @example
- * const { restore } = setEnv({ DEEPGREP_API_KEY: "test-key", FC_CACHE_DISABLED: "true" });
+ * const { restore } = setEnv({ WINDSURF_API_KEY: "test-key", FC_CACHE_DISABLED: "true" });
  * // ... run test
  * restore(); // resets all env changes
  */

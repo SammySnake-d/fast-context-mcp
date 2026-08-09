@@ -25,7 +25,7 @@ import { join } from "node:path";
  * cleanup();
  */
 export function createTestProject(files = {}) {
-  const root = mkdtempSync(join(tmpdir(), "deepgrep-test-"));
+  const root = mkdtempSync(join(tmpdir(), "fast-context-test-"));
 
   for (const [relPath, content] of Object.entries(files)) {
     const fullPath = join(root, relPath);

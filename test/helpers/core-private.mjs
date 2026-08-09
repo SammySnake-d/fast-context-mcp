@@ -14,7 +14,7 @@
  * We test the BEHAVIOR spec these functions must satisfy.
  */
 
-import { connectFrameEncode, connectFrameDecode, extractStrings } from "../../deepgrep/src/protobuf.mjs";
+import { connectFrameEncode, connectFrameDecode, extractStrings } from "../../src/protobuf.mjs";
 
 // ─── stripInvalidUtf8 ─────────────────────────────────────
 // Spec: strip \ufffd replacement chars from UTF-8 decoded buffer.

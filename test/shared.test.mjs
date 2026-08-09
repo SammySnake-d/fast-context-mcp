@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getRepoMap, _excludePatternToRegex, buildWindsurfPrompt, buildOpenAIPrompt, MAX_TREE_BYTES, FINAL_FORCE_ANSWER, FINAL_FORCE_ANSWER_OPENAI } from "../deepgrep/src/shared.mjs";
+import { getRepoMap, _excludePatternToRegex, buildWindsurfPrompt, MAX_TREE_BYTES, FINAL_FORCE_ANSWER } from "../src/shared.mjs";
 
 describe("_excludePatternToRegex", () => {
   it("matches exact name (literal)", () => {
@@ -46,7 +46,7 @@ describe("getRepoMap", () => {
   });
 });
 
-describe("buildWindsurfPrompt / buildOpenAIPrompt", () => {
+describe("buildWindsurfPrompt", () => {
   it("substitutes parameters", () => {
     const wp = buildWindsurfPrompt(5, 10, 15);
     assert(wp.includes("5") && wp.includes("10") && wp.includes("15"));
@@ -57,19 +57,11 @@ describe("buildWindsurfPrompt / buildOpenAIPrompt", () => {
     assert(buildWindsurfPrompt().includes("[TOOL_CALLS]"));
   });
 
-  it("OpenAI prompt does NOT contain [TOOL_CALLS]", () => {
-    assert(!buildOpenAIPrompt().includes("[TOOL_CALLS]"));
-  });
-
-  it("prompts are distinct (AC3 from story 1)", () => {
-    assert.notEqual(buildWindsurfPrompt(), buildOpenAIPrompt());
-  });
 });
 
 describe("constants", () => {
-  it("FINAL_FORCE_ANSWER variants are distinct", () => {
-    assert.notEqual(FINAL_FORCE_ANSWER, FINAL_FORCE_ANSWER_OPENAI);
-    assert(FINAL_FORCE_ANSWER_OPENAI.includes("answer tool"));
+  it("FINAL_FORCE_ANSWER instructs the model to finish", () => {
+    assert(FINAL_FORCE_ANSWER.includes("final ANSWER"));
   });
 
   it("MAX_TREE_BYTES = 250KB", () => {

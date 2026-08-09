@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { writeFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ToolExecutor } from "../deepgrep/src/executor.mjs";
+import { ToolExecutor } from "../src/executor.mjs";
 
 describe("ToolExecutor", () => {
   let root, exec;

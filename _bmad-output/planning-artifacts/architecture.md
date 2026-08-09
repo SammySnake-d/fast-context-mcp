@@ -74,7 +74,8 @@ openai-backend.mjs (friendlyError layer)
 - Invalidation: mtimeHash của top-level files. **Giới hạn đã biết:** đổi file sâu mà mtime thư mục không đổi có thể miss — chấp nhận cho v1.1, TTL là safety net.
 
 ### ADR-3: Escalation flow ưu tiên cache
-- Thứ tự: `shouldEscalate` → chọn mode → `getRepoMap` → `buildCacheKey` → check cache → (hit return / miss → call → setCache).
+- Thứ tự: `shouldEscalate` → chọn mode → `computeMtimeHash` → `buildCacheKey` → check cache → (hit return / miss → `getRepoMap` → call → setCache).
+- Cache key dùng query/config + recursive mtime/size/path fingerprint; repo-map chỉ được tạo sau cache miss. Cache hit không làm auth/network I/O, giữ NFR1 <100ms trên repo mục tiêu.
 - Escalated deep call cũng đi qua cache → query phức tạp lặp lại vẫn được cache.
 
 ### ADR-4: Error UX là presentation layer, không đổi retry logic

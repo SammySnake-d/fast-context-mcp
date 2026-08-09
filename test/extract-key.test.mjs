@@ -1,6 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { getDbPath, extractKey } from "../deepgrep/src/extract-key.mjs";
+import {
+  getDbPath,
+  getDbPathCandidates,
+  extractApiKeyFromToml,
+  extractKey,
+} from "../deepgrep/src/extract-key.mjs";
 
 describe("getDbPath", () => {
   it("returns a string path", () => {
@@ -19,6 +24,28 @@ describe("getDbPath", () => {
 
   it("path includes state.vscdb", () => {
     assert(getDbPath().endsWith("state.vscdb"));
+  });
+});
+
+describe("credential compatibility", () => {
+  for (const platformName of ["darwin", "win32", "linux"]) {
+    it(`prefers Devin and retains Deviv/Windsurf fallbacks on ${platformName}`, () => {
+      const candidates = getDbPathCandidates({
+        platformName,
+        homeDir: "/home/tester",
+        env: { APPDATA: "C:\\Users\\tester\\AppData\\Roaming" },
+      });
+      assert.match(candidates[0], /Devin/);
+      assert(candidates.some((path) => path.includes("Deviv")));
+      assert(candidates.some((path) => path.includes("Windsurf")));
+    });
+  }
+
+  it("accepts Devin session tokens without an sk- prefix", () => {
+    assert.equal(
+      extractApiKeyFromToml('token = "devin-session-example-token"\n'),
+      "devin-session-example-token",
+    );
   });
 });
 

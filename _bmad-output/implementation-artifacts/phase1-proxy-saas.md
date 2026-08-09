@@ -24,8 +24,10 @@
 **Tạo npm org:**
 ```bash
 npm login
-npm org create chainlens   # hoặc org bạn đã có
 ```
+
+Tạo organization `chainlens` trên npmjs.com, sau đó dùng `npm org set`,
+`npm org ls`, hoặc `npm org rm` để quản lý thành viên từ CLI.
 
 ### Task 1.2: Đổi default config hướng về router bạn
 

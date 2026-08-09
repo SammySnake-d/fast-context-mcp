@@ -17,7 +17,7 @@ so that future development is reliable and contributors aren't misled by stale d
 ### AC1: README matches reality
 - **Given** README hiện ghi `better-sqlite3`, model `MODEL_SWE_1_6_FAST`, thiếu `deep_context_search`
 - **When** đọc README
-- **Then** Dependencies = `sql.js`; env vars có `FC_DEEP_*`; Setup mô tả Devin Desktop; model default = `MODEL_SWE_1_6_SLOW`; MCP Tools liệt kê `deep_context_search`
+- **Then** Dependencies = `sql.js`; env vars deep mode được document; Setup mô tả Devin Desktop; model mặc định = `MODEL_SWE_1_6_FAST` để tương thích free tier; MCP Tools khớp runtime
 
 ### AC2: Version synchronized + bumped
 - **Given** server.mjs = "1.2.0", package.json = "1.2.1"
@@ -85,7 +85,7 @@ Auto (Claude via Kiro CLI)
 - T1: Created `src/shared.mjs` (237 lines) exporting: `getRepoMap`, `_parseAnswer`, `_excludePatternToRegex`, `MAX_TREE_BYTES`, `FINAL_FORCE_ANSWER`, `buildWindsurfPrompt`, `buildOpenAIPrompt`. Two prompt templates kept intentionally separate per architecture spec.
 - T2: Refactored `core.mjs` — removed 180+ lines of duplicated code, translated 4 Chinese comments to English, removed unused imports (`existsSync`, `statSync`, `join`, `readdirSync`, `treeNodeCli`).
 - T3: Refactored `openai-backend.mjs` — removed `_parseAnswerLocal` function, removed inline `getRepoMap` logic (~50 lines), removed duplicate `SYSTEM_PROMPT_TEMPLATE` and `FINAL_FORCE_ANSWER`, removed unused `import { readdirSync }` and `import { relative, sep, isAbsolute }`.
-- T4: Synced README — added `FC_DEEP_*` env vars, Devin Desktop setup section, `deep_context_search` MCP tool docs, updated project structure to show `shared.mjs` and `openai-backend.mjs`, fixed model default to `MODEL_SWE_1_6_SLOW`.
+- T4: Synced README — documented deep-mode env vars, Devin Desktop setup, runtime MCP tools, project structure, and the free-tier-compatible `MODEL_SWE_1_6_FAST` default.
 - T5: Version bumped both `server.mjs` and `package.json` to `1.3.0`.
 - T6: All `node --check src/*.mjs` pass (7/7 files). No Chinese comments remain. No unused imports remain.
 

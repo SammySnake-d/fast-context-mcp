@@ -14,9 +14,9 @@
   ],
   "scripts": {
     "start": "node deepgrep/src/server.mjs",
-    "test": "node --test 'test/**/*.test.mjs'",
-    "test:unit": "node --test 'test/*.test.mjs'",
-    "test:ci": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=test-results.xml 'test/**/*.test.mjs'"
+    "test": "node --test",
+    "test:unit": "node --test",
+    "test:ci": "node --test --test-reporter=spec --test-reporter-destination=stdout --test-reporter=junit --test-reporter-destination=test-results.xml"
   },
   "engines": {
     "node": ">=18"
@@ -44,7 +44,7 @@
     "@vscode/ripgrep": "^1.15.9",
     "sql.js": "^1.14.0",
     "tree-node-cli": "^1.6.0",
-    "zod": "^3.25.0"
+    "zod": "^3.25.76"
   },
   "license": "MIT"
 }

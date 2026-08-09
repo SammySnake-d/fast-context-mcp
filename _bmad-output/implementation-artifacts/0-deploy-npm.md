@@ -31,28 +31,22 @@ Workflow đã set up sẵn: tạo Release trên GitHub → tự động publish 
 **Bước thực hiện:**
 
 ```bash
-# 1. Đảm bảo version trong package.json đúng
-# Hiện tại: 1.2.1. Nếu muốn bump:
-npm version patch    # → 1.2.2 (bugfix)
-npm version minor    # → 1.3.0 (new features ← khuyến nghị)
-npm version major    # → 2.0.0 (breaking changes)
+# 1. Sửa version trong package.json và server.mjs trong cùng commit
+# (không dùng `npm version` trước commit vì lệnh đó tự tạo commit + tag)
 
-# 2. Sync version trong server.mjs (nếu chưa)
-# Sửa dòng `version: "1.2.0"` → khớp package.json
-
-# 3. Commit + push
+# 2. Commit + push
 git add -A
 git commit -m "chore: bump version to 1.3.0"
 git push origin main
 
-# 4. Tạo GitHub Release
+# 3. Tạo GitHub Release (tag được tạo trên đúng commit đã sync version)
 # Option A: CLI (nhanh nhất)
 gh release create v1.3.0 --title "v1.3.0" --notes "
 ## What's New
 - Devin Desktop support (auto-detect key from Devin local DB)
 - New tool: deep_context_search (GPT-5.5 / Sonnet 4.6 via 9router combo)
 - Response validation + auto-retry for proxy issues
-- Default model: MODEL_SWE_1_6_SLOW
+- Default model: MODEL_SWE_1_6_FAST (free-tier compatible)
 
 ## Breaking Changes
 None — backward compatible.
@@ -63,7 +57,7 @@ None — backward compatible.
 # Tag: v1.3.0, Target: main, Title: v1.3.0
 # Paste release notes
 
-# 5. CI tự động chạy (xem Actions tab)
+# 4. CI tự động chạy (xem Actions tab)
 # Workflow: publish.yml → npm publish --tag latest --access public --provenance
 ```
 

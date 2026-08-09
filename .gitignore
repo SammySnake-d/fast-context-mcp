@@ -8,7 +8,7 @@ node_modules/
 # Local docs (not for distribution)
 localdocs/
 _bmad/
-_bmad-ouput/
+_bmad-output/
 .agents
 .claude
 .kiro

@@ -66,7 +66,7 @@ Env var rename (cache):
 ### T2. Verify cache + no-cache-empty (AC: #1, #2, #3)
 - [x] Fast + deep mode: query → lại → `cache_hit=true` trong [config]
 - [x] Edit file → `cache_hit=false`
-- [x] `setCachedResult` callers: SKIP cache khi `result.files?.length === 0` hoặc result đến từ escalation. (Sửa ở điểm gọi setCachedResult trong cả 2 backend.)
+- [x] `setCachedResult` callers: SKIP cache khi `result.files?.length === 0`; kết quả escalation hợp lệ vẫn được cache theo ADR-3. (Sửa ở điểm gọi setCachedResult trong cả 2 backend.)
 
 ### T3. Tạo `src/escalate.mjs` (AC: #6-#11)
 - [x] shouldEscalate(query) với multi-hop keywords + clause count + non-ASCII detection
@@ -76,7 +76,7 @@ Env var rename (cache):
 - [x] shouldEscalate → escalate pre-check trước khi chạy quick
 - [x] Escalate on empty result
 - [x] Deep config qua opts (không env mutation)
-- [x] Append "[escalated: ...]" + refineHint
+- [x] Append `[escalated to deep mode: complex query]` hoặc `[escalated to deep mode: empty result]` + refineHint
 
 ### T5. `_friendlyError(err, model)` (AC: #12, #13, #14)
 - [x] Thêm `friendlyError` vào `shared.mjs`

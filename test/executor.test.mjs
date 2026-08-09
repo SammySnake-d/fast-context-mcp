@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { writeFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ToolExecutor } from "../deepgrep/src/executor.mjs";
@@ -35,13 +35,29 @@ describe("ToolExecutor", () => {
       assert.equal(real, root);
     });
 
-    it("returns root for null/undefined input", () => {
-      assert.equal(exec._real(null), root);
-      assert.equal(exec._real(undefined), root);
+    it("rejects null/undefined input", () => {
+      assert.throws(() => exec._real(null), /invalid path/);
+      assert.throws(() => exec._real(undefined), /invalid path/);
     });
 
-    it("returns non-virtual path as-is", () => {
-      assert.equal(exec._real("/some/other/path"), "/some/other/path");
+    it("rejects absolute paths outside the project", () => {
+      assert.throws(() => exec._real("/some/other/path"), /outside codebase/);
+    });
+
+    it("rejects traversal and sibling-prefix paths", () => {
+      assert.throws(() => exec._real("/codebase/../../etc/passwd"), /outside codebase/);
+      assert.throws(() => exec._real("/codebase-other/file.txt"), /outside codebase/);
+    });
+
+    it("rejects an existing symlink that escapes the project", () => {
+      const outside = mkdtempSync(join(tmpdir(), "fc-outside-"));
+      try {
+        writeFileSync(join(outside, "secret.txt"), "outside\n");
+        symlinkSync(outside, join(root, "escape"));
+        assert.throws(() => exec._real("/codebase/escape/secret.txt"), /outside codebase/);
+      } finally {
+        rmSync(outside, { recursive: true, force: true });
+      }
     });
   });
 
@@ -128,6 +144,25 @@ describe("ToolExecutor", () => {
 
     it("errors when path is a directory", () => {
       assert(exec.readfile("/codebase/src").includes("file not found"));
+    });
+
+    it("blocks out-of-project reads through direct and dispatched calls", async () => {
+      assert.match(exec.readfile("/etc/passwd"), /outside codebase/);
+      const out = await exec.execToolCallAsync({
+        command1: { type: "readfile", file: "/etc/passwd", start_line: 1, end_line: 2 },
+      });
+      assert.match(out, /outside codebase/);
+      assert.doesNotMatch(out, /root:x:/);
+    });
+  });
+
+  describe("project confinement across primitives", () => {
+    it("blocks rg, tree, ls, and glob outside the project", async () => {
+      assert.match(await exec.rgAsync("root", "/etc"), /outside codebase/);
+      assert.match(exec.rg("root", "/etc"), /outside codebase/);
+      assert.match(exec.tree("/etc"), /outside codebase/);
+      assert.match(exec.ls("/etc"), /outside codebase/);
+      assert.match(exec.glob("*", "/etc"), /outside codebase/);
     });
   });
 

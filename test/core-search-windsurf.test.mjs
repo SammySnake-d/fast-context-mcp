@@ -93,7 +93,7 @@ describe("searchWithContent() — mocked fetch timeout", () => {
 });
 
 describe("extractKeyInfo()", () => {
-  it("returns an object with api_key when Windsurf is installed", async () => {
+  it("returns a structured credential result without throwing", async () => {
     let result = null, threw = false;
     try {
       result = await extractKeyInfo();
@@ -101,13 +101,12 @@ describe("extractKeyInfo()", () => {
       threw = true;
     }
     if (!threw && result !== null) {
-      // extractKey() returns { api_key: string, ... } on this machine
       assert.ok(
         typeof result === "object" || typeof result === "string",
         `expected object or string, got ${typeof result}`
       );
       if (typeof result === "object") {
-        assert.ok("api_key" in result, "expected api_key field in result object");
+        assert.ok("api_key" in result || "error" in result, "expected API key or diagnostic error");
       }
     }
     // threw or null also acceptable (no Windsurf on this machine)

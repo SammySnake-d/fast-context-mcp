@@ -62,7 +62,7 @@ const HIDE_EXTRACT_WINDSURF_KEY_TOOL = readBoolEnv("FC_HIDE_EXTRACT_WINDSURF_KEY
 
 const server = new McpServer({
   name: "windsurf-fast-context",
-  version: "1.3.1",
+  version: "1.3.2",
   instructions:
     "Windsurf Fast Context — AI-driven semantic code search. " +
     "Returns file paths with line ranges and grep keywords.\n" +

@@ -78,7 +78,7 @@ describe("MCP stdio integration", () => {
     try {
       const res = await c.initialize();
       assert.equal(res.result?.serverInfo?.name, "windsurf-fast-context");
-      assert.equal(res.result?.serverInfo?.version, "1.3.1");
+      assert.equal(res.result?.serverInfo?.version, "1.3.2");
     } finally {
       c.close();
     }

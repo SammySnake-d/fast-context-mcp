@@ -11,6 +11,7 @@ import { join, resolve, relative, sep, basename } from "node:path";
 import { promisify } from "node:util";
 import { rgPath } from "@vscode/ripgrep";
 import treeNodeCli from "tree-node-cli";
+import { resolveWithinRoot } from "./path-safety.mjs";
 
 const execFileAsync = promisify(execFileCb);
 
@@ -52,15 +53,7 @@ export class ToolExecutor {
    * @returns {string}
    */
   _real(virtual) {
-    // Guard against undefined/null from malformed AI responses
-    if (virtual == null || typeof virtual !== "string") {
-      return this.root;
-    }
-    if (virtual.startsWith("/codebase") || virtual.startsWith("\\codebase")) {
-      const rel = virtual.slice("/codebase".length).replace(/^[\/\\]+/, "");
-      return join(this.root, rel);
-    }
-    return virtual;
+    return resolveWithinRoot(this.root, virtual);
   }
 
   /**
@@ -133,7 +126,12 @@ export class ToolExecutor {
       return "Error: missing or invalid path";
     }
     this.collectedRgPatterns.push(pattern);
-    const rp = this._real(path);
+    let rp;
+    try {
+      rp = this._real(path);
+    } catch (e) {
+      return `Error: ${e.message}`;
+    }
     if (!existsSync(rp)) {
       return `Error: path does not exist: ${path}`;
     }
@@ -185,7 +183,12 @@ export class ToolExecutor {
       return "Error: missing or invalid path";
     }
     this.collectedRgPatterns.push(pattern);
-    const rp = this._real(path);
+    let rp;
+    try {
+      rp = this._real(path);
+    } catch (e) {
+      return `Error: ${e.message}`;
+    }
     if (!existsSync(rp)) {
       return `Error: path does not exist: ${path}`;
     }
@@ -234,7 +237,12 @@ export class ToolExecutor {
     if (!file || typeof file !== "string") {
       return "Error: missing or invalid file path";
     }
-    const rp = this._real(file);
+    let rp;
+    try {
+      rp = this._real(file);
+    } catch (e) {
+      return `Error: ${e.message}`;
+    }
     try {
       const stat = statSync(rp);
       if (!stat.isFile()) {
@@ -271,7 +279,12 @@ export class ToolExecutor {
     if (!path || typeof path !== "string") {
       return "Error: missing or invalid path";
     }
-    const rp = this._real(path);
+    let rp;
+    try {
+      rp = this._real(path);
+    } catch (e) {
+      return `Error: ${e.message}`;
+    }
     try {
       const stat = statSync(rp);
       if (!stat.isDirectory()) {
@@ -309,7 +322,12 @@ export class ToolExecutor {
     if (!path || typeof path !== "string") {
       return "Error: missing or invalid path";
     }
-    const rp = this._real(path);
+    let rp;
+    try {
+      rp = this._real(path);
+    } catch (e) {
+      return `Error: ${e.message}`;
+    }
     try {
       const stat = statSync(rp);
       if (!stat.isDirectory()) {
@@ -372,7 +390,12 @@ export class ToolExecutor {
     if (!path || typeof path !== "string") {
       return "Error: missing or invalid path";
     }
-    const rp = this._real(path);
+    let rp;
+    try {
+      rp = this._real(path);
+    } catch (e) {
+      return `Error: ${e.message}`;
+    }
 
     // Use recursive readdir + fnmatch since Node 22 globSync may not be available
     const matches = [];

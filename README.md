@@ -1,6 +1,6 @@
 # Fast Context MCP
 
-AI-driven semantic code search as an MCP tool — powered by Windsurf's reverse-engineered SWE-grep protocol.
+Multi-backend AI-driven semantic code search as an MCP tool — powered by Windsurf's reverse-engineered SWE-grep protocol (free) and any OpenAI-compatible endpoint.
 
 Any MCP-compatible client (Claude Code, Claude Desktop, Cursor, etc.) can use this to search codebases with natural language queries. All tools are bundled via npm — **no system-level dependencies** needed (ripgrep via `@vscode/ripgrep`, tree via `tree-node-cli`). Works on macOS, Windows, and Linux.
 
@@ -63,17 +63,17 @@ npm install
 
 ## Setup
 
-### 1. Get Your Windsurf API Key
+### 1. Get Your Windsurf/Devin API Key
 
-The server auto-extracts the API key from your local Windsurf installation. You can also use the `extract_windsurf_key` MCP tool after setup, or set `WINDSURF_API_KEY` manually.
+The server auto-extracts the API key from Devin CLI/Desktop or a legacy Windsurf installation. You can also set `WINDSURF_API_KEY` manually.
 
-Key is stored in Devin's local SQLite database. The legacy Windsurf path is still checked as a fallback:
+Desktop credentials are discovered in this order: `Devin`, legacy `Deviv`, then `Windsurf`.
 
 | Platform | Path |
 |----------|------|
-| macOS | `~/Library/Application Support/Deviv/User/globalStorage/state.vscdb` |
-| Windows | `%APPDATA%/Deviv/User/globalStorage/state.vscdb` |
-| Linux | `~/.config/Deviv/User/globalStorage/state.vscdb` |
+| macOS | `~/Library/Application Support/Devin/User/globalStorage/state.vscdb` |
+| Windows | `%APPDATA%/Devin/User/globalStorage/state.vscdb` |
+| Linux | `~/.config/Devin/User/globalStorage/state.vscdb` |
 
 On WSL/Linux, the server first checks Devin CLI credentials at `~/.local/share/devin/credentials.toml`. If a Windows-extracted key returns 403 inside WSL, run `devin login` inside WSL and retry.
 
@@ -141,6 +141,22 @@ For beta/next release:
 
 > If `WINDSURF_API_KEY` is omitted, the server auto-discovers it from your local Windsurf installation.
 
+#### Devin Desktop
+
+Add to `devin_mcp_config.json` under `mcpServers`:
+
+```json
+{
+  "fast-context": {
+    "command": "npx",
+    "args": ["-y", "--prefer-online", "@sammysnake/fast-context-mcp"],
+    "env": {
+      "WINDSURF_API_KEY": "sk-ws-01-xxxxx"
+    }
+  }
+}
+```
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -149,12 +165,21 @@ For beta/next release:
 | `FC_MAX_TURNS` | `3` | Search rounds per query (more = deeper but slower) |
 | `FC_MAX_COMMANDS` | `8` | Max parallel commands per round |
 | `FC_TIMEOUT_MS` | `30000` | Connect-Timeout-Ms for streaming requests |
-| `FC_HIDE_EXTRACT_WINDSURF_KEY_TOOL` | `false` | Hide `extract_windsurf_key` from MCP tools when set to `1`, `true`, `yes`, or `on` |
 | `FC_RESULT_MAX_LINES` | `50` | Max lines per command output (truncation) |
 | `FC_LINE_MAX_CHARS` | `250` | Max characters per output line (truncation) |
-| `WS_MODEL` | `MODEL_SWE_1_6_FAST` | Windsurf model name |
+| `FC_SNIPPET_MAX_LINES` | `200` | Total line budget for returned snippets |
+| `WS_MODEL` | `MODEL_SWE_1_6_FAST` | Windsurf model name; set explicitly only when the account supports another model |
 | `WS_APP_VER` | `1.48.2` | Windsurf app version (protocol metadata) |
 | `WS_LS_VER` | `1.9544.35` | Windsurf language server version (protocol metadata) |
+| `DEEPGREP_API_URL` | `https://router.chainlens.net/v1` | OpenAI-compatible API URL for deep search |
+| `DEEPGREP_API_KEY` | *(none)* | API key for deep search and OpenAI fast mode |
+| `DEEPGREP_MODEL` | `deep-search` | Deep-search model ID |
+| `DEEPGREP_FAST_BACKEND` | `windsurf` | Fast backend: `windsurf` or `openai` |
+| `DEEPGREP_FAST_MODEL` | *(deep model)* | Model override when fast backend is `openai` |
+| `DEEPGREP_CACHE_DISABLED` | *(unset)* | Disable result cache with `1`, `true`, `yes`, or `on` |
+| `DEEPGREP_CACHE_TTL_MS` | `300000` | Result-cache TTL; `<=0` disables caching |
+| `DEEPGREP_CACHE_MAX_ENTRIES` | `200` | Maximum in-memory cache entries |
+| `FC_ALLOW_INSECURE_TLS` | *(unset)* | Set to `1` to disable TLS cert verification (e.g. corporate proxy) |
 
 ## Available Models
 
@@ -162,11 +187,11 @@ The model can be changed by setting `WS_MODEL` (see environment variables above)
 
 ![Available Models](docs/models.png)
 
-Default: `MODEL_SWE_1_6_FAST` — fastest speed, richest grep keywords, finest location granularity.
+Default: `MODEL_SWE_1_6_FAST` — the broadly available free-tier model. Accounts with access can select another model through `WS_MODEL`.
 
 ## MCP Tools
 
-### `fast_context_search`
+### `deepgrep_search`
 
 AI-driven semantic code search with tunable parameters.
 
@@ -177,6 +202,9 @@ AI-driven semantic code search with tunable parameters.
 | `tree_depth` | integer | No | `3` | Directory tree depth for repo map (1-6). Higher = more context but larger payload. Auto falls back to lower depth if tree exceeds 250KB. Use 1-2 for huge monorepos (>5000 files), 3 for most projects, 4-6 for small projects. |
 | `max_turns` | integer | No | `3` | Search rounds (1-5). More = deeper search but slower. Use 1-2 for simple lookups, 3 for most queries, 4-5 for complex analysis. |
 | `max_results` | integer | No | `10` | Maximum number of files to return (1-30). Smaller = more focused, larger = broader exploration. |
+| `exclude_paths` | string[] | No | `[]` | Directory/file patterns excluded from search context. |
+| `include_snippets` | boolean | No | `false` | Include code snippets for returned line ranges. |
+| `auto_escalate` | boolean | No | `true` | Route complex or empty-result searches to deep mode when configured. |
 
 Returns:
 1. **Relevant files** with line ranges
@@ -201,7 +229,7 @@ Error output includes status-specific hints:
 Error: Request failed: HTTP 403
 
 [hint] 403 Forbidden: Authentication failed. The API key may be expired or revoked.
-Try re-extracting with extract_windsurf_key, or set a fresh WINDSURF_API_KEY env var.
+Run `deepgrep_status` to inspect credential discovery, or set a fresh `WINDSURF_API_KEY`.
 If you are running inside WSL, run `devin login` inside WSL so `~/.local/share/devin/credentials.toml` exists.
 ```
 
@@ -212,23 +240,43 @@ Error: Request failed: HTTP 413
 [hint] If the error is payload-related, try a lower tree_depth value.
 ```
 
-### `extract_windsurf_key`
+### `deepgrep_deep`
 
-Extract Windsurf API Key from local installation. No parameters.
+Deep AI-driven semantic code search using an OpenAI-compatible backend. More thorough than `deepgrep_search` but slower (20-40s). Use when fast search returns 0 results or when you need comprehensive cross-file analysis.
 
-Set `FC_HIDE_EXTRACT_WINDSURF_KEY_TOOL=1` at MCP server startup to hide this tool from `tools/list`. This does not disable internal API-key auto-discovery for `fast_context_search`.
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | Yes | — | Natural language search query |
+| `project_path` | string | No | cwd | Absolute path to project root |
+| `tree_depth` | integer | No | `3` | Directory tree depth (1-6) |
+| `max_results` | integer | No | `10` | Maximum files to return (1-30) |
+| `exclude_paths` | string[] | No | `[]` | Patterns to exclude |
+
+Requires `DEEPGREP_API_KEY`; endpoint/model are controlled by `DEEPGREP_API_URL` and `DEEPGREP_MODEL`.
+
+### `deepgrep_get`
+
+Reads exact code snippets after search. Paths are confined to `project_path` (default: server cwd).
+
+### `deepgrep_status`
+
+Reports backend configuration, model availability, and Devin/Windsurf credential discovery status.
 
 ## Project Structure
 
 ```
 fast-context-mcp/
 ├── package.json
-├── src/
-│   ├── server.mjs        # MCP server entry point
-│   ├── core.mjs          # Auth, message building, streaming, search loop
-│   ├── executor.mjs      # Tool executor: rg, readfile, tree, ls, glob
-│   ├── extract-key.mjs   # Windsurf API Key extraction (SQLite)
-│   └── protobuf.mjs      # Protobuf encoder/decoder + Connect-RPC frames
+├── deepgrep/
+│   └── src/
+│       ├── server.mjs         # MCP server entry point
+│       ├── core.mjs           # Windsurf protocol: auth, streaming, search loop
+│       ├── openai-backend.mjs # OpenAI-compatible backend for deep search
+│       ├── shared.mjs         # Shared utilities: repo map, prompts, parsers
+│       ├── executor.mjs       # Confined rg/readfile/tree/ls/glob executor
+│       ├── extract-key.mjs    # Devin/Windsurf credential discovery
+│       └── protobuf.mjs       # Protobuf encoder/decoder + Connect-RPC frames
+├── test/                 # Unit and MCP stdio integration tests
 ├── README.md
 └── LICENSE
 ```
@@ -260,8 +308,12 @@ fast-context-mcp/
 | `@modelcontextprotocol/sdk` | MCP server framework |
 | `@vscode/ripgrep` | Bundled ripgrep binary (cross-platform) |
 | `tree-node-cli` | Cross-platform directory tree (replaces system `tree`) |
-| `better-sqlite3` | Read Windsurf's local SQLite DB |
-| `zod` | Schema validation (MCP SDK requirement) |
+| `sql.js` | Read Windsurf's local SQLite DB (WASM, no native compile) |
+| `zod` (`^3.25.76`) | Schema validation; excludes the incomplete `3.25.0` tarball served by some npm mirrors while retaining Zod 3 compatibility |
+
+## 友情链接
+
+- [LINUX DO](https://linux.do/t/topic/1583790/64)
 
 ## License
 

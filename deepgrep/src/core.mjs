@@ -1,5 +1,5 @@
 /**
- * Windsurf Fast Context — core protocol implementation (Node.js).
+ * deepgrep — core protocol implementation (Node.js).
  *
  * Reverse-engineered Windsurf SWE-grep Connect-RPC/Protobuf protocol
  * for standalone AI-driven semantic code search.
@@ -11,12 +11,10 @@
  *   → ANSWER: file paths + line ranges + suggested rg patterns
  */
 
-import { readdirSync, existsSync, statSync } from "node:fs";
-import { resolve, join, relative, sep, isAbsolute } from "node:path";
+import { resolve } from "node:path";
 import { gzipSync } from "node:zlib";
 import { randomUUID } from "node:crypto";
 import { platform, arch, release, version as osVersion, hostname, cpus, totalmem } from "node:os";
-import treeNodeCli from "tree-node-cli";
 
 import {
   ProtobufEncoder,
@@ -25,7 +23,20 @@ import {
   connectFrameDecode,
 } from "./protobuf.mjs";
 import { ToolExecutor } from "./executor.mjs";
+import {
+  parseJsonWithRepair,
+  salvageRestrictedExecArgs,
+  salvageSearchEvidence,
+} from "./response-repair.mjs";
 import { extractKey } from "./extract-key.mjs";
+import {
+  getRepoMap,
+  _parseAnswer,
+  FINAL_FORCE_ANSWER,
+  buildWindsurfPrompt,
+} from "./shared.mjs";
+import { buildCacheKey, getCachedResult, setCachedResult, computeMtimeHash } from "./cache.mjs";
+import { readSnippets } from "./snippets.mjs";
 
 // ─── Error Classification ──────────────────────────────────
 
@@ -79,160 +90,13 @@ const AUTH_BASE = "https://server.self-serve.windsurf.com/exa.auth_pb.AuthServic
 const WS_APP = "windsurf";
 const WS_APP_VER = process.env.WS_APP_VER || "1.48.2";
 const WS_LS_VER = process.env.WS_LS_VER || "1.9544.35";
+// FAST is available to the same free-tier accounts as the legacy package.
+// SLOW can return permission_denied for otherwise valid credentials.
 const WS_MODEL = process.env.WS_MODEL || "MODEL_SWE_1_6_FAST";
 
-// ─── System Prompt Template ────────────────────────────────
+// ─── System Prompt ─────────────────────────────────────────
 
-const SYSTEM_PROMPT_TEMPLATE = `You are an expert software engineer, responsible for providing context \
-to another engineer to solve a code issue in the current codebase. \
-The user will present you with a description of the issue, and it is \
-your job to provide a series of file paths with associated line ranges \
-that contain ALL the information relevant to understand and correctly \
-address the issue.
-
-# IMPORTANT:
-- A relevant file does not mean only the files that must be modified to \
-solve the task. It means any file that contains information relevant to \
-planning and implementing the fix, such as the definitions of classes \
-and functions that are relevant to the pieces of code that will have to \
-be modified.
-- You should include enough context around the relevant lines to allow \
-the engineer to understand the task correctly. You must include ENTIRE \
-semantic blocks (functions, classes, definitions, etc). For example:
-If addressing the issue requires modifying a method within a class, then \
-you should include the entire class definition, not just the lines around \
-the method we want to modify.
-- NEVER truncate these blocks unless they are very large (hundreds of \
-lines or more, in which case providing only a relevant portion of the \
-block is acceptable).
-- Your job is to essentially alleviate the job of the other engineer by \
-giving them a clean starting context from which to start working. More \
-precisely, you should minimize the number of files the engineer has to \
-read to understand and solve the task correctly (while not providing \
-irrelevant code snippets).
-
-# ENVIRONMENT
-- Working directory: /codebase. Make sure to run commands in this \
-directory, not \`.
-- Tool access: use the restricted_exec tool ONLY
-- Allowed sub-commands (schema-enforced):
-  - rg: Search for patterns in files using ripgrep
-    - Required: pattern (string), path (string)
-    - Optional: include (array of globs), exclude (array of globs)
-  - readfile: Read contents of a file with optional line range
-    - Required: file (string)
-    - Optional: start_line (int), end_line (int) — 1-indexed, inclusive
-  - tree: Display directory structure as a tree
-    - Required: path (string)
-    - Optional: levels (int)
-
-# THINKING RULES
-- Think step-by-step. Plan, reason, and reflect before each tool call.
-- Use tool calls liberally and purposefully to ground every conclusion \
-in real code, not assumptions.
-- If a command fails, rethink and try something different; do not \
-complain to the user.
-
-# FAST-SEARCH DEFAULTS (optimize rg/tree on large repos)
-- Start NARROW, then widen only if needed. Prefer searching likely code \
-roots first (e.g., \`src/\`, \`lib/\`, \`app/\`, \`packages/\`, \`services/\`) \
-instead of \`/codebase\`.
-- Prefer fixed-string search for literals: escape patterns or keep regex \
-simple. Use smart case; avoid case-insensitive unless necessary.
-- Prefer file-type filters and globs (in include) over full-repo scans.
-- Default EXCLUDES for speed (apply via the exclude array): \
-node_modules, .git, dist, build, coverage, .venv, venv, target, out, \
-.cache, __pycache__, vendor, deps, third_party, logs, data, *.min.*
-- Skip huge files where possible; when opening files, prefer reading \
-only relevant ranges with readfile.
-- Limit directory traversal with tree levels to quickly orient before \
-deeper inspection.
-
-# SOME EXAMPLES OF WORKFLOWS
-- MAP – Use \`tree\` with small levels; \`rg\` on likely roots to grasp \
-structure and hotspots.
-- ANCHOR – \`rg\` for problem keywords and anchor symbols; restrict by \
-language globs via include.
-- TRACE – Follow imports with targeted \`rg\` in narrowed roots; open \
-files with \`readfile\` scoped to entire semantic blocks.
-- VERIFY – Confirm each candidate path exists by reading or additional \
-searches; drop false positives (tests, vendored, generated) unless they \
-must change.
-
-# TOOL USE GUIDELINES
-- You must use a SINGLE restricted_exec call in your answer, that lets \
-you execute at most {max_commands} commands in a single turn. Each command must be \
-an object with a \`type\` field of \`rg\`, \`readfile\`, or \`tree\` and the appropriate fields for that type.
-- Example restricted_exec usage:
-[TOOL_CALLS]restricted_exec[ARGS]{{
-  "command1": {{
-    "type": "rg",
-    "pattern": "Controller",
-    "path": "/codebase/slime",
-    "include": ["**/*.py"],
-    "exclude": ["**/node_modules/**", "**/.git/**", "**/dist/**", \
-"**/build/**", "**/.venv/**", "**/__pycache__/**"]
-  }},
-  "command2": {{
-    "type": "readfile",
-    "file": "/codebase/slime/train.py",
-    "start_line": 1,
-    "end_line": 200
-  }},
-  "command3": {{
-    "type": "tree",
-    "path": "/codebase/slime/",
-    "levels": 2
-  }}
-}}
-- You have at most {max_turns} turns to interact with the environment by calling \
-tools, so issuing multiple commands at once is necessary and encouraged \
-to speed up your research.
-- Each command result may be truncated to 50 lines; prefer multiple \
-targeted reads/searches to build complete context.
-- DO NOT EVER USE MORE THAN {max_commands} commands in a single turn, or you will \
-be penalized.
-
-# ANSWER FORMAT (strict format, including tags)
-- You will output an XML structure with a root element "ANSWER" \
-containing "file" elements. Each "file" element will have a "path" \
-attribute and contain "range" elements.
-- You will output this as your final response.
-- The line ranges must be inclusive.
-
-Output example inside the "answer" tool argument:
-<ANSWER>
-  <file path="/codebase/info_theory/formulas/entropy.py">
-    <range>10-60</range>
-    <range>150-210</range>
-  </file>
-  <file path="/codebase/info_theory/data_structures/bits.py">
-    <range>1-40</range>
-    <range>110-170</range>
-  </file>
-</ANSWER>
-
-
-Remember: Prefer narrow, fixed-string, and type-filtered searches with \
-aggressive excludes and size/depth limits. Widen scope only as needed. \
-Use the restricted tools available to you, and output your answer in \
-exactly the specified format.
-
-# NO RESULTS POLICY
-If after thorough searching you are confident that NO relevant files exist \
-for the given query (e.g., the function/class/concept does not exist in the \
-codebase), you MUST return an empty ANSWER:
-<ANSWER></ANSWER>
-Do NOT return irrelevant files (such as entry points or config files) just \
-to provide some output. An empty answer is always better than a misleading one.
-
-# RESULT COUNT
-Aim to return at most {max_results} files in your answer. Focus on the most \
-relevant files first. If fewer files are relevant, return fewer.
-`;
-
-const FINAL_FORCE_ANSWER =
-  "You have no turns left. Now you MUST provide your final ANSWER, even if it's not complete.";
+// System prompt is built via buildWindsurfPrompt() from shared.mjs
 
 /**
  * Trim accumulated messages to reduce payload size for retry.
@@ -254,18 +118,7 @@ function _trimMessages(messages) {
   return true;
 }
 
-/**
- * @param {number} maxTurns
- * @param {number} maxCommands
- * @param {number} maxResults
- * @returns {string}
- */
-function buildSystemPrompt(maxTurns = 3, maxCommands = 8, maxResults = 10) {
-  return SYSTEM_PROMPT_TEMPLATE
-    .replaceAll("{max_turns}", String(maxTurns))
-    .replaceAll("{max_commands}", String(maxCommands))
-    .replaceAll("{max_results}", String(maxResults));
-}
+// buildSystemPrompt is now buildWindsurfPrompt from shared.mjs
 
 // ─── Tool Schema ───────────────────────────────────────────
 
@@ -366,9 +219,7 @@ function getToolDefinitions(maxCommands = 8) {
 async function autoDiscoverApiKey() {
   try {
     const result = await extractKey();
-    if (result.api_key) {
-      // Accept any non-empty key: Windsurf keys start with "sk-", but a logged-in
-      // Devin session stores a "devin-session-token$..." JWT in the same field.
+    if (result.api_key && result.api_key.length > 10) {
       return result.api_key;
     }
   } catch {
@@ -429,18 +280,20 @@ async function getCachedJwt(apiKey) {
   return token;
 }
 
-// ─── TLS Fallback ──────────────────────────────────────────
-// Match Python's SSL fallback: if NODE_TLS_REJECT_UNAUTHORIZED is not set
-// and the first fetch fails with a TLS error, disable cert verification.
+// ─── TLS Security ──────────────────────────────────────────
+// TLS certificate verification is ALWAYS enabled by default.
+// Only disabled when FC_ALLOW_INSECURE_TLS=1 (e.g. corporate proxy).
 let _tlsFallbackApplied = false;
 
 function _applyTlsFallback() {
-  if (!_tlsFallbackApplied && !process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
+  if (_tlsFallbackApplied) return;
+  const allowed = process.env.FC_ALLOW_INSECURE_TLS === "1";
+  if (allowed && !process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
     process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
     _tlsFallbackApplied = true;
     process.stderr.write(
-      "[fast-context] WARNING: TLS certificate verification disabled due to connection failure. " +
-      "Set NODE_TLS_REJECT_UNAUTHORIZED=0 explicitly to suppress this warning.\n"
+      "[deepgrep] WARNING: TLS certificate verification disabled (FC_ALLOW_INSECURE_TLS=1). " +
+      "Remove this env var to restore secure defaults.\n"
     );
   }
 }
@@ -594,7 +447,7 @@ async function fetchJwt(apiKey) {
   meta.writeString(1, WS_APP);
   meta.writeString(2, WS_APP_VER);
   meta.writeString(3, apiKey);
-  meta.writeString(4, "zh-cn");
+  meta.writeString(4, "en");
   meta.writeString(7, WS_LS_VER);
   meta.writeString(12, WS_APP);
   meta.writeBytes(30, Buffer.from([0x00, 0x01]));
@@ -644,7 +497,7 @@ function _buildMetadata(apiKey, jwt) {
   meta.writeString(1, WS_APP);
   meta.writeString(2, WS_APP_VER);
   meta.writeString(3, apiKey);
-  meta.writeString(4, "zh-cn");
+  meta.writeString(4, "en");
 
   const plat = platform();
   const sysInfo = {
@@ -754,7 +607,7 @@ function stripInvalidUtf8(buf) {
  * @param {string} text
  * @returns {[string, string, Object]|null} [thinking, name, args] or null
  */
-function _parseToolCall(text) {
+export function _parseToolCall(text) {
   text = text.replace(/<\/s>/g, "");
   const m = text.match(/\[TOOL_CALLS\](\w+)\[ARGS\](\{.+)/s);
   if (!m) return null;
@@ -777,12 +630,12 @@ function _parseToolCall(text) {
   }
   if (end === 0) end = raw.length;
 
-  let args;
-  try {
-    args = JSON.parse(raw.slice(0, end));
-  } catch {
-    return null;
+  const jsonText = raw.slice(0, end);
+  let args = parseJsonWithRepair(jsonText);
+  if (!args && name === "restricted_exec") {
+    args = salvageRestrictedExecArgs(jsonText);
   }
+  if (!args) return null;
 
   const thinking = text.slice(0, m.index).trim();
   return [thinking, name, args];
@@ -837,124 +690,11 @@ function _parseResponse(data) {
 
 // ─── Core Search ───────────────────────────────────────────
 
-// Max safe tree size in bytes (server payload limit ~346KB, fixed overhead ~26KB,
-// leave room for conversation accumulation across rounds)
-const MAX_TREE_BYTES = 250 * 1024;
+// getRepoMap, _parseAnswer, _excludePatternToRegex, MAX_TREE_BYTES
+// are imported from shared.mjs
 
 /**
- * Convert an exclude pattern (directory/file name or simple glob) to RegExp
- * for tree-node-cli's exclude option.
- * @param {string} pattern - e.g. "node_modules", "dist", "*.min.*"
- * @returns {RegExp}
- */
-function _excludePatternToRegex(pattern) {
-  if (!/[*?]/.test(pattern)) {
-    // Simple name — exact match
-    return new RegExp("^" + pattern.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "$");
-  }
-  // Glob → regex
-  let regex = "^";
-  for (const c of pattern) {
-    if (c === "*") regex += ".*";
-    else if (c === "?") regex += ".";
-    else if (".+^${}()|[]\\".includes(c)) regex += "\\" + c;
-    else regex += c;
-  }
-  regex += "$";
-  return new RegExp(regex);
-}
-
-/**
- * Get a directory tree of the project with adaptive depth fallback.
- *
- * Tries the requested depth first. If the tree output exceeds MAX_TREE_BYTES,
- * automatically falls back to lower depths until it fits.
- *
- * @param {string} projectRoot
- * @param {number} [targetDepth=3] - Desired tree depth (1-6)
- * @param {string[]} [excludePaths=[]] - Patterns to exclude from tree
- * @returns {{ tree: string, depth: number, sizeBytes: number, fellBack: boolean }}
- */
-function getRepoMap(projectRoot, targetDepth = 3, excludePaths = []) {
-  const rootPattern = new RegExp(projectRoot.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "g");
-  const dirName = projectRoot.split("/").pop() || projectRoot.split("\\").pop() || projectRoot;
-  const excludeRegexes = excludePaths.length ? excludePaths.map(_excludePatternToRegex) : [];
-
-  for (let L = targetDepth; L >= 1; L--) {
-    try {
-      const opts = { maxDepth: L };
-      if (excludeRegexes.length) opts.exclude = excludeRegexes;
-      const stdout = treeNodeCli(projectRoot, opts);
-      // tree-node-cli outputs basename as root line; replace with /codebase
-      let treeStr = stdout.replace(rootPattern, "/codebase");
-      // Also replace the basename root line (first line) if full path wasn't matched
-      const lines = treeStr.split("\n");
-      if (lines[0] === dirName) {
-        lines[0] = "/codebase";
-        treeStr = lines.join("\n");
-      }
-      const sizeBytes = Buffer.byteLength(treeStr, "utf-8");
-
-      if (sizeBytes <= MAX_TREE_BYTES) {
-        return { tree: treeStr, depth: L, sizeBytes, fellBack: L < targetDepth };
-      }
-      // Too large, try lower depth
-    } catch {
-      // tree failed at this level, try lower
-    }
-  }
-
-  // Ultimate fallback: simple ls (also respects excludePaths)
-  try {
-    let entries = readdirSync(projectRoot).sort();
-    if (excludeRegexes.length) {
-      entries = entries.filter((e) => !excludeRegexes.some((rx) => rx.test(e)));
-    }
-    const treeStr = ["/codebase", ...entries.map((e) => `├── ${e}`)].join("\n");
-    return { tree: treeStr, depth: 0, sizeBytes: Buffer.byteLength(treeStr, "utf-8"), fellBack: true };
-  } catch {
-    const treeStr = "/codebase\n(empty or inaccessible)";
-    return { tree: treeStr, depth: 0, sizeBytes: treeStr.length, fellBack: true };
-  }
-}
-
-/**
- * Parse answer XML into structured file + range data.
- * @param {string} xmlText
- * @param {string} projectRoot
- * @returns {{ files: Array }}
- */
-function _parseAnswer(xmlText, projectRoot) {
-  const files = [];
-  const resolvedRoot = resolve(projectRoot);
-  const fileRegex = /<file\s+path=(["'])([^"']+)\1>([\s\S]*?)<\/file>/g;
-  let fm;
-  while ((fm = fileRegex.exec(xmlText)) !== null) {
-    const vpath = fm[2];
-    let rel = vpath.replace(/^\/codebase[\/\\]?/, "");
-    rel = rel.replace(/^[\/\\]+/, "");
-
-    // Path safety: reject traversal attempts (../) and paths outside project root
-    const fullPath = resolve(projectRoot, rel);
-    const relToRoot = relative(resolvedRoot, fullPath);
-    if (relToRoot === ".." || relToRoot.startsWith(`..${sep}`) || isAbsolute(relToRoot)) {
-      continue;
-    }
-
-    const ranges = [];
-    const rangeRegex = /<range>(\d+)-(\d+)<\/range>/g;
-    let rm;
-    while ((rm = rangeRegex.exec(fm[3])) !== null) {
-      ranges.push([parseInt(rm[1], 10), parseInt(rm[2], 10)]);
-    }
-
-    files.push({ path: rel, full_path: fullPath, ranges });
-  }
-  return { files };
-}
-
-/**
- * Execute Fast Context search.
+ * Execute deepgrep search.
  *
  * @param {Object} opts
  * @param {string} opts.query - Natural language search query
@@ -986,6 +726,17 @@ export async function search({
   const log = (msg) => onProgress?.(msg);
   projectRoot = resolve(projectRoot);
 
+  // Cache hits must avoid auth/network and repo-map work. The recursive mtime
+  // fingerprint includes file paths, sizes, and mtimes, so it also invalidates
+  // when the searchable tree changes.
+  const mtimeHash = computeMtimeHash(projectRoot, excludePaths);
+  const cacheKey = buildCacheKey({ query, model: WS_MODEL, maxTurns, maxResults, treeDepth, mtimeHash, excludePaths });
+  const cached = getCachedResult(cacheKey);
+  if (cached) {
+    log("Cache hit");
+    return { ...cached, _meta: { ...cached._meta, cache_hit: true } };
+  }
+
   // Get credentials
   if (!apiKey) {
     apiKey = await getApiKey();
@@ -1003,10 +754,11 @@ export async function search({
 
   const executor = new ToolExecutor(projectRoot);
   const toolDefs = getToolDefinitions(maxCommands);
-  const systemPrompt = buildSystemPrompt(maxTurns, maxCommands, maxResults);
+  const systemPrompt = buildWindsurfPrompt(maxTurns, maxCommands, maxResults);
 
   const { tree: repoMap, depth: actualDepth, sizeBytes: treeSizeBytes, fellBack } = getRepoMap(projectRoot, treeDepth, excludePaths);
   log(`Repo map: tree -L ${actualDepth} (${(treeSizeBytes / 1024).toFixed(1)}KB)${fellBack ? ` [fell back from L=${treeDepth}]` : ""}`);
+
   const userContent = `Problem Statement: ${query}\n\nRepo Map (tree -L ${actualDepth} /codebase):\n\`\`\`text\n${repoMap}\n\`\`\``;
 
   const messages = [
@@ -1016,8 +768,8 @@ export async function search({
 
   // Total API calls = maxTurns + 1 (last round for answer)
   const totalApiCalls = maxTurns + 1;
-  let compensatedTurns = 0; // 补偿的轮次数
-  const MAX_COMPENSATIONS = 2; // 最大补偿次数，防止死循环
+  let compensatedTurns = 0; // compensated turn count
+  const MAX_COMPENSATIONS = 2; // max compensations to prevent infinite loops
   let forceAnswerInjected = false;
 
   for (let turn = 0; turn < totalApiCalls + compensatedTurns; turn++) {
@@ -1061,6 +813,20 @@ export async function search({
       if (thinking.startsWith("[Error]")) {
         return { files: [], error: thinking };
       }
+      const salvaged = salvageSearchEvidence(thinking, projectRoot);
+      if (salvaged.files.length || salvaged.rg_patterns.length) {
+        return {
+          ...salvaged,
+          raw_response: thinking,
+          _meta: {
+            treeDepth: actualDepth,
+            treeSizeKB: +(treeSizeBytes / 1024).toFixed(1),
+            fellBack,
+            projectRoot,
+            salvaged_response: true,
+          },
+        };
+      }
       return { files: [], raw_response: thinking };
     }
 
@@ -1071,7 +837,11 @@ export async function search({
       log("Received final answer");
       const result = _parseAnswer(answerXml, projectRoot);
       result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
-      result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack };
+      result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, cache_hit: false, projectRoot };
+      // AC#3: skip caching empty results so auto-escalation can retry next time
+      if (result.files?.length > 0) {
+        setCachedResult(cacheKey, result);
+      }
       return result;
     }
 
@@ -1084,14 +854,14 @@ export async function search({
 
       const results = await executor.execToolCallAsync(toolArgs);
 
-      // 检测到所有 command 都是无效的 → 不算有效轮次
+      // Detect all commands invalid → don't count as effective turn
       const validCommands = cmds.filter(k => {
         const c = toolArgs[k];
-        return c && c.type; // 至少有 type 字段
+        return c && c.type; // at least has a type field
       });
 
       if (validCommands.length === 0 && compensatedTurns < MAX_COMPENSATIONS) {
-        compensatedTurns++; // 补偿：这轮不算有效轮次
+        compensatedTurns++; // compensate: this turn doesn't count as effective
         log(`Turn compensation: no valid commands, extending search by 1 turn (${compensatedTurns}/${MAX_COMPENSATIONS})`);
       } else if (validCommands.length === 0) {
         log(`Turn compensation skipped: max compensations (${MAX_COMPENSATIONS}) reached, forcing turn advance`);
@@ -1115,6 +885,24 @@ export async function search({
         log("Injected force-answer prompt");
       }
     }
+  }
+
+  const conversationText = messages
+    .flatMap((message) => [message.content, message.tool_args_json])
+    .filter(Boolean)
+    .join("\n");
+  const salvaged = salvageSearchEvidence(conversationText, projectRoot);
+  if (salvaged.files.length || salvaged.rg_patterns.length) {
+    return {
+      ...salvaged,
+      _meta: {
+        treeDepth: actualDepth,
+        treeSizeKB: +(treeSizeBytes / 1024).toFixed(1),
+        fellBack,
+        projectRoot,
+        salvaged_response: true,
+      },
+    };
   }
 
   return {
@@ -1150,6 +938,7 @@ export async function searchWithContent({
   treeDepth = 3,
   timeoutMs = 30000,
   excludePaths = [],
+  includeSnippets = false,
 }) {
   const result = await search({ query, projectRoot, apiKey, maxTurns, maxCommands, maxResults, treeDepth, timeoutMs, excludePaths });
 
@@ -1202,6 +991,25 @@ export async function searchWithContent({
     parts.push("No files found.");
   }
 
+  // Append code snippets if requested
+  if (includeSnippets && files.length) {
+    const snippetMap = readSnippets(files);
+    if (snippetMap.size) {
+      parts.push("");
+      parts.push("--- Code Snippets ---");
+      for (const file of files) {
+        const snippet = snippetMap.get(file.full_path);
+        if (snippet) {
+          parts.push("");
+          parts.push(`## ${file.path}`);
+          parts.push("```");
+          parts.push(snippet);
+          parts.push("```");
+        }
+      }
+    }
+  }
+
   if (uniquePatterns.length) {
     parts.push("");
     parts.push(`grep keywords: ${uniquePatterns.join(", ")}`);
@@ -1214,6 +1022,7 @@ export async function searchWithContent({
     parts.push("");
     let configLine = `[config] tree_depth=${meta.treeDepth}${fbNote}, tree_size=${meta.treeSizeKB}KB, max_turns=${maxTurns}, max_results=${maxResults}, timeout_ms=${timeoutMs}`;
     if (excludePaths.length) configLine += `, exclude_paths=[${excludePaths.join(", ")}]`;
+    if (meta.cache_hit) configLine += `, cache_hit=true`;
     parts.push(configLine);
   }
 

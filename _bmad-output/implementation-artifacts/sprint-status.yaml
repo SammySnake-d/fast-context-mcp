@@ -1,0 +1,43 @@
+# Sprint Status — deepgrep v1.1 / v1.2
+# STATUS: backlog | ready-for-dev | in-progress | review | done | wont-do | gated
+
+last_updated: 2026-06-08 (Architecture review — ADR-8/9/10, Epic 4 reordered)
+project_name: deepgrep
+
+development_status:
+  # ── v1.1 (done) ──────────────────────────────────────────
+  # Story 1: Core Intelligence (P0)
+  # Covers: cache rename + verify, auto-escalation, error UX
+  # Modules: cache.mjs, escalate.mjs (new), server.mjs, openai-backend.mjs
+  1-core-intelligence: done
+
+  # Story 2: Developer Experience (P1)
+  # Covers: deepgrep_status tool, single binary build
+  # Modules: health.mjs (new), server.mjs, package.json
+  2-developer-experience: done
+
+  # ── v1.2 (backlog) ───────────────────────────────────────
+  # Story 3.1: deepgrep_get — Token-efficient two-stage retrieval (P0)
+  # Covers: FR7 — tool mới tái dụng snippets.mjs, không cần API key
+  # Modules: server.mjs (tool mới), snippets.mjs (tái dụng)
+  3-token-efficient-retrieval: done
+
+  # Story 3.2: Warm cache (P1 optional)
+  # Covers: FR8 — precompute repo map + cache warming
+  3-warm-cache: wont-do
+  # ── v1.3 (backlog) — Portable Context Engine ─────────────
+  # Epic 4: Zero-index context engine. Vision shift from "search tool"
+  # → "context engine". Same job as Augment, zero-index architecture.
+  # See prd.md §9, epics.md Epic 4.
+  # Execution order (dependency-driven): 4.1 → 4.3 → 4.2 (see architecture.md ADR-8/9)
+  4-stable-output-contract: backlog       # Story 4.1: JSON contract (contract.mjs) — do FIRST
+  4-ranking-dedup: backlog                # Story 4.3: rank.mjs + dedup — do SECOND
+  4-context-pack: backlog                 # Story 4.2: deepgrep_pack + roles.mjs — do LAST
+
+  # ── v2.0 (gated) — Optional Indexed Tier ─────────────────
+  # Epic 5: NORTH STAR. Augment-style persistent context, local-first.
+  # GATED — do not start until ≥2 conditions pass (see prd.md §9).
+  # If gate never passes, this is intentionally not built.
+  5-local-incremental-index: gated        # Story 5.1
+  5-multi-repo-context: gated             # Story 5.2 (placeholder)
+

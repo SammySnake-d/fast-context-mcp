@@ -7,7 +7,11 @@ node_modules/
 
 # Local docs (not for distribution)
 localdocs/
-
+_bmad/
+_bmad-output/
+.agents
+.claude
+.kiro
 # Legacy Python artifacts
 __pycache__/
 *.pyc
@@ -22,3 +26,6 @@ test_*.py
 
 # Old Node.js dev copy
 fast-context-mcp-node/
+
+# Throwaway diagnostic scripts (may reference secrets via env)
+_diag.mjs

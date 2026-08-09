@@ -1,0 +1,485 @@
+diff --git a/.gitignore b/.gitignore
+index bc70cec..b1997f0 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -4,3 +4,4 @@ node_modules/
+ test/
+ 
+ image/
++dist/
+diff --git a/README.md b/README.md
+index e607805..8172851 100644
+--- a/README.md
++++ b/README.md
+@@ -46,13 +46,13 @@ deepgrep "trace the auth flow" → 4 files, done.
+ 
+ ## Quick Start
+ 
++### Option A: npx (recommended)
++
+ ### 1. Get a free API key
+ 
+ → [deepgrep.chainlens.net](https://deepgrep.chainlens.net)
+ 
+-### 2. Add to your MCP client
+-
+-#### Kiro
++### 2. Add to your MCP client#### Kiro
+ 
+ Add to `~/.kiro/settings/mcp.json`:
+ 
+@@ -105,13 +105,62 @@ Settings → MCP → Add server → command: `npx -y deepgrep`, env: `DEEPGREP_A
+ 
+ ### 3. Done! Ask your code anything.
+ 
+-## Two Search Modes
++### Option B: Standalone binary (no Node required)
++
++```bash
++# Download binary (macOS example):
++curl -L https://github.com/deptrai/deepgrep/releases/latest/download/deepgrep-macos -o deepgrep
++chmod +x deepgrep
++```
++
++Or build from source (requires [Bun](https://bun.sh)):
++```bash
++git clone https://github.com/deptrai/deepgrep
++cd deepgrep && npm install
++npm run build:binary   # outputs dist/deepgrep
++```
++
++Then configure your MCP client with:
++```json
++"command": "/path/to/deepgrep"
++```
++
++## MCP Tools
++
++deepgrep exposes three tools:
++
++### `deepgrep_search` — Fast mode (quick)
++
++### `deepgrep_deep` — Deep mode (thorough)
+ 
+ | Mode | Tool | Speed | Best for |
+ |------|------|-------|----------|
+ | **Fast** | `deepgrep_search` | ~3-5s | Quick lookups, simple queries |
+ | **Deep** | `deepgrep_deep` | ~20-30s | Complex tracing, architecture, multi-hop |
+ 
++`deepgrep_search` supports `auto_escalate=true` (default): automatically switches to deep mode for complex queries or empty results.
++
++### `deepgrep_status` — Health check
++
++No parameters. Returns:
++- ✅/❌ API key validity
++- ✅/❌/⚠️ Model availability (rate limited, unauthorized, etc.)
++- ✅/⚠️ Devin Desktop detection
++- Current configuration summary
++
++```
++deepgrep status
++
++✅ API key: valid
++✅ Endpoint: https://router.chainlens.net/v1
++✅ deep-search: available
++✅ Devin Desktop: detected (fast mode auto-key OK)
++
++Config: fast_backend=windsurf, deep_model=deep-search
++```
++
++Use this to verify your setup or debug configuration issues.
++
+ Both use your `DEEPGREP_API_KEY`. One key, both modes.
+ 
+ ### Fast mode examples
+diff --git a/package.json b/package.json
+index 999d032..9f7f0b7 100644
+--- a/package.json
++++ b/package.json
+@@ -14,7 +14,8 @@
+   ],
+   "scripts": {
+     "start": "node src/server.mjs",
+-    "test": "node --test 'test/*.test.mjs'"
++    "test": "node --test 'test/*.test.mjs'",
++    "build:binary": "bun build src/server.mjs --compile --outfile dist/deepgrep"
+   },
+   "engines": {
+     "node": ">=18"
+diff --git a/src/core.mjs b/src/core.mjs
+index a97c85a..0b308c1 100644
+--- a/src/core.mjs
++++ b/src/core.mjs
+@@ -815,7 +815,10 @@ export async function search({
+       const result = _parseAnswer(answerXml, projectRoot);
+       result.rg_patterns = [...new Set(executor.collectedRgPatterns)];
+       result._meta = { treeDepth: actualDepth, treeSizeKB: +(treeSizeBytes / 1024).toFixed(1), fellBack, cache_hit: false };
+-      setCachedResult(cacheKey, result);
++      // AC#3: skip caching empty results so auto-escalation can retry next time
++      if (result.files?.length > 0) {
++        setCachedResult(cacheKey, result);
++      }
+       return result;
+     }
+ 
+diff --git a/src/escalate.mjs b/src/escalate.mjs
+index 09fd969..fc3edc2 100644
+--- a/src/escalate.mjs
++++ b/src/escalate.mjs
+@@ -6,15 +6,19 @@
+  * to avoid wasting tokens on simple queries.
+  */
+ 
+-// Multi-hop keywords that strongly indicate cross-file tracing
++// Multi-hop keywords that strongly indicate cross-file tracing.
++// Entries containing ".*" are treated as regex (word-bounded to avoid
++// over-matching substrings like "transformation topology" for "from.*to").
+ const MULTI_HOP_KEYWORDS = [
+   "trace", "flow", "across", "through", "pipeline", "end-to-end", "end to end",
+-  "data flow", "call chain", "from.*to", "how does.*work", "walk me through",
++  "data flow", "call chain", "\\bfrom\\b.*\\bto\\b", "how does.*work", "walk me through",
+   "full path", "all the way", "step by step", "entire flow",
+ ];
+ 
+-// Clause separators that indicate multiple requirements in one query
+-const CLAUSE_SEPARATORS = [" and ", " + ", " & ", " then ", " also ", " as well as ", ", and ", " plus "];
++// Clause separators that indicate multiple requirements in one query.
++// Ordered longest-first so overlapping separators (", and " ⊃ " and ") are
++// consumed once and not double-counted.
++const CLAUSE_SEPARATORS = [" as well as ", ", and ", " then ", " also ", " plus ", " and ", " + ", " & "];
+ 
+ // Non-ASCII range used to detect non-English queries (Vietnamese, Chinese, etc.)
+ const NON_ASCII_RE = /[^\x00-\x7F]/;
+@@ -51,16 +55,21 @@ export function shouldEscalate(query) {
+     }
+   }
+ 
+-  // 2. Clause count (3+ clauses = complex query)
+-  let clauses = 1;
++  // 2. Clause count (3+ clauses = complex query).
++  // Consume separators longest-first, replacing each match with a space so an
++  // overlapping shorter separator (e.g. " and " inside ", and ") isn't re-counted.
++  let work = q;
++  let boundaries = 0;
+   for (const sep of CLAUSE_SEPARATORS) {
+-    if (q.includes(sep)) {
+-      clauses += (q.split(sep).length - 1);
++    const before = work.split(sep);
++    if (before.length > 1) {
++      boundaries += before.length - 1;
++      work = before.join(" ");
+     }
+   }
+-  // Also count commas that separate distinct concepts (not in file paths)
+-  const commas = (q.match(/,\s*[a-z]/g) || []).length;
+-  clauses += commas;
++  // Count remaining commas that separate distinct concepts (after separators consumed).
++  const commas = (work.match(/,\s*[a-z]/g) || []).length;
++  const clauses = 1 + boundaries + commas;
+ 
+   if (clauses >= 3) {
+     return { escalate: true, reason: `complex query: ${clauses} clauses detected`, refineHint };
+diff --git a/src/health.mjs b/src/health.mjs
+new file mode 100644
+index 0000000..7468729
+--- /dev/null
++++ b/src/health.mjs
+@@ -0,0 +1,168 @@
++/**
++ * Health check for deepgrep — validates API key, models, and Devin Desktop.
++ *
++ * Used by the deepgrep_status MCP tool.
++ */
++
++import { existsSync } from "node:fs";
++import { getDbPath } from "./extract-key.mjs";
++
++const SIGNUP_URL = "https://deepgrep.chainlens.net";
++
++/**
++ * Ping a single model via chat completions to check availability.
++ * Returns "ok", "rate_limited" (429), "unauthorized" (403/401), or "error:<msg>".
++ * @param {string} baseUrl
++ * @param {string} apiKey
++ * @param {string} model
++ * @returns {Promise<string>}
++ */
++async function _pingModel(baseUrl, apiKey, model) {
++  const controller = new AbortController();
++  const timer = setTimeout(() => controller.abort(), 8000);
++  try {
++    const resp = await fetch(`${baseUrl}/chat/completions`, {
++      method: "POST",
++      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
++      body: JSON.stringify({
++        model,
++        messages: [{ role: "user", content: "ping" }],
++        max_tokens: 3,
++        stream: false,
++      }),
++      signal: controller.signal,
++    });
++    clearTimeout(timer);
++    if (resp.status === 200) return "ok";
++    if (resp.status === 429) return "rate_limited";
++    if (resp.status === 403 || resp.status === 401) return "unauthorized";
++    return `error:${resp.status}`;
++  } catch (e) {
++    clearTimeout(timer);
++    if (e.name === "AbortError") return "error:timeout";
++    return `error:${e.message?.slice(0, 40) || "unknown"}`;
++  }
++}
++
++/**
++ * Check whether the Devin Desktop (or legacy Windsurf) local DB exists.
++ * @returns {boolean}
++ */
++function _detectDevin() {
++  try {
++    return existsSync(getDbPath());
++  } catch {
++    return false;
++  }
++}
++
++/**
++ * Run a full health check of the deepgrep configuration.
++ *
++ * @returns {Promise<{
++ *   keyValid: boolean,
++ *   endpoint: string,
++ *   models: Array<{id: string, status: string}>,
++ *   devinDetected: boolean,
++ *   config: { fastBackend: string, fastModel: string, deepModel: string, apiUrl: string },
++ *   signupUrl: string
++ * }>}
++ */
++export async function checkHealth() {
++  const apiUrl = process.env.DEEPGREP_API_URL || "https://router.chainlens.net/v1";
++  const apiKey = process.env.DEEPGREP_API_KEY || "";
++  const deepModel = process.env.DEEPGREP_MODEL || "deep-search";
++  const fastBackend = process.env.DEEPGREP_FAST_BACKEND || "windsurf";
++  const fastModel = process.env.DEEPGREP_FAST_MODEL || "";
++
++  // 1. Check if key is set and valid — use a quick chat ping (more reliable than /models timeout)
++  let keyValid = false;
++  if (apiKey) {
++    const status = await _pingModel(apiUrl, apiKey, "deep-search");
++    keyValid = status === "ok" || status === "rate_limited"; // rate_limited = key valid but throttled
++  }
++
++  // 2. Ping up to 2 models
++  const modelsToPing = ["deep-search"];
++  if (deepModel && deepModel !== "deep-search") {
++    modelsToPing.push(deepModel);
++  }
++
++  const models = [];
++  if (apiKey && keyValid) {
++    for (const id of modelsToPing) {
++      const status = await _pingModel(apiUrl, apiKey, id);
++      models.push({ id, status });
++    }
++  }
++
++  // 3. Devin Desktop detection
++  const devinDetected = _detectDevin();
++
++  return {
++    keyValid,
++    endpoint: apiUrl,
++    models,
++    devinDetected,
++    config: { fastBackend, fastModel, deepModel, apiUrl },
++    signupUrl: SIGNUP_URL,
++  };
++}
++
++/**
++ * Format a HealthReport into a human-readable string for MCP output.
++ * @param {Object} report
++ * @returns {string}
++ */
++export function formatHealthReport(report) {
++  const lines = ["deepgrep status", ""];
++
++  // Key
++  if (report.keyValid) {
++    lines.push("✅ API key: valid");
++  } else if (process.env.DEEPGREP_API_KEY) {
++    lines.push("❌ API key: invalid or unreachable");
++  } else {
++    lines.push(`❌ API key: not set — get a free key at ${report.signupUrl}`);
++  }
++
++  // Endpoint
++  lines.push(`✅ Endpoint: ${report.endpoint}`);
++
++  // Models
++  for (const m of report.models) {
++    if (m.status === "ok") {
++      lines.push(`✅ ${m.id}: available`);
++    } else if (m.status === "rate_limited") {
++      lines.push(`⚠️  ${m.id}: rate limited (429)`);
++    } else if (m.status === "unauthorized") {
++      lines.push(`❌ ${m.id}: unauthorized (403/401)`);
++    } else {
++      lines.push(`⚠️  ${m.id}: ${m.status}`);
++    }
++  }
++
++  // Devin Desktop
++  if (report.devinDetected) {
++    lines.push("✅ Devin Desktop: detected (fast mode auto-key OK)");
++  } else {
++    const fastNote = report.config.fastBackend === "windsurf"
++      ? "⚠️  Devin Desktop: not detected — set DEEPGREP_FAST_BACKEND=openai for fast mode"
++      : "ℹ️  Devin Desktop: not detected (fast mode using openai backend)";
++    lines.push(fastNote);
++  }
++
++  // Config summary
++  lines.push("");
++  lines.push(`Config: fast_backend=${report.config.fastBackend}` +
++    (report.config.fastModel ? `, fast_model=${report.config.fastModel}` : "") +
++    `, deep_model=${report.config.deepModel}`);
++
++  // Signup hint if key missing
++  if (!report.keyValid && !process.env.DEEPGREP_API_KEY) {
++    lines.push("");
++    lines.push(`💡 Get a free API key: ${report.signupUrl}`);
++  }
++
++  return lines.join("\n");
++}
+diff --git a/src/server.mjs b/src/server.mjs
+index 0f86d1d..aff7cd2 100644
+--- a/src/server.mjs
++++ b/src/server.mjs
+@@ -88,13 +88,13 @@ function _formatResult(result, maxTurns, maxResults, maxCommands, timeoutMs, exc
+     const model = meta.model || "unknown";
+     // Build a fake error object to get friendly message
+     const fakeErr = { message: result.error, status: null };
+-    if (result.error.includes("429")) fakeErr.status = 429;
+-    else if (result.error.includes("403")) fakeErr.status = 403;
+-    else if (result.error.includes("401")) fakeErr.status = 401;
+-    const friendly = (fakeErr.status || result.error.toLowerCase().includes("rate limit") || result.error.toLowerCase().includes("not accessible"))
+-      ? friendlyError(fakeErr, model)
+-      : `Error: ${result.error}`;
+-    let errMsg = friendly;
++    if (/\b429\b/.test(result.error)) fakeErr.status = 429;
++    else if (/\b403\b/.test(result.error)) fakeErr.status = 403;
++    else if (/\b401\b/.test(result.error)) fakeErr.status = 401;
++    const isFriendly = fakeErr.status || result.error.toLowerCase().includes("rate limit") || result.error.toLowerCase().includes("not accessible");
++    let errMsg = isFriendly ? friendlyError(fakeErr, model) : `Error: ${result.error}`;
++    // Preserve backend/model diagnostic for generic (non-friendly) errors
++    if (!isFriendly && meta.backend) errMsg += ` [backend=${meta.backend}, model=${meta.model}]`;
+     if (meta.treeDepth != null) errMsg += `\n[diagnostic] tree_depth=${meta.treeDepth}, tree_size=${meta.treeSizeKB}KB`;
+     return errMsg;
+   }
+@@ -254,36 +254,31 @@ server.tool(
+       model: DEEP_MODEL, baseUrl: DEEP_BASE_URL, apiKey: DEEP_API_KEY,
+     };
+ 
+-    // Check if query should be escalated to deep mode before running quick
+-    if (auto_escalate && DEEP_API_KEY) {
+-      const { escalate, reason, refineHint } = shouldEscalate(query);
+-      if (escalate) {
+-        const backend = getBackend("openai");
+-        const result = await backend.search({
+-          query, projectRoot: projectPath, maxTurns: 3,
+-          maxCommands: MAX_COMMANDS, maxResults: max_results,
+-          treeDepth: tree_depth, timeoutMs: 90000,
+-          excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
+-          ...deepOpts,
+-        });
+-        let text = _formatResult(result, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
+-        text += `\n[escalated to deep mode: ${reason}]`;
+-        if (refineHint) text += `\n${refineHint}`;
+-        return { content: [{ type: "text", text }] };
+-      }
+-      // Non-English hint even without escalation
+-      if (refineHint) {
+-        // Will be appended to result below
+-      }
++    // Evaluate escalation heuristic ONCE (local, ~0ms). refineHint applies even
++    // when DEEP_API_KEY is unset (so the non-English tip is still surfaced).
++    const { escalate, refineHint } = auto_escalate
++      ? shouldEscalate(query)
++      : { escalate: false, refineHint: null };
++
++    // Pre-escalate complex queries to deep mode before running quick
++    if (auto_escalate && DEEP_API_KEY && escalate) {
++      const backend = getBackend("openai");
++      const result = await backend.search({
++        query, projectRoot: projectPath, maxTurns: 3,
++        maxCommands: MAX_COMMANDS, maxResults: max_results,
++        treeDepth: tree_depth, timeoutMs: 90000,
++        excludePaths: exclude_paths.length ? exclude_paths : ["node_modules", "dist", ".git", "build", ".next"],
++        ...deepOpts,
++      });
++      let text = _formatResult(result, 3, max_results, MAX_COMMANDS, 90000, exclude_paths, include_snippets);
++      text += `\n[escalated to deep mode: complex query]`;
++      if (refineHint) text += `\n${refineHint}`;
++      return { content: [{ type: "text", text }] };
+     }
+ 
+     try {
+       let text;
+-      let refineHintForOutput = null;
+-      if (auto_escalate) {
+-        const { refineHint } = shouldEscalate(query);
+-        refineHintForOutput = refineHint;
+-      }
++      const refineHintForOutput = refineHint;
+ 
+       if (FAST_BACKEND === "openai") {
+         // Use OpenAI-compatible backend for fast mode — pass config via opts (no env mutation)
+@@ -321,8 +316,10 @@ server.tool(
+           excludePaths: exclude_paths, includeSnippets: include_snippets,
+         });
+ 
+-        // Auto-escalate on empty results (windsurf → deep)
+-        if (auto_escalate && DEEP_API_KEY && text.startsWith("No relevant files found")) {
++        // Auto-escalate on empty results (windsurf → deep).
++        // Covers both empty-output variants from searchWithContent.
++        const isEmpty = text.startsWith("No relevant files found") || text.startsWith("No files found");
++        if (auto_escalate && DEEP_API_KEY && isEmpty) {
+           const deepBackend = getBackend("openai");
+           const deepResult = await deepBackend.search({
+             query, projectRoot: projectPath, maxTurns: 3,
+@@ -447,6 +444,21 @@ server.tool(
+ 
+ // ─── Note: extract_windsurf_key is internal only (not exposed as a tool) ───
+ 
++// ─── Tool: deepgrep_status ─────────────────────────────────
++
++server.tool(
++  "deepgrep_status",
++  "Check deepgrep configuration and model availability. " +
++  "Returns API key validity, endpoint, model status, and Devin Desktop detection. " +
++  "Use this to verify your setup or debug configuration issues.",
++  {},
++  async () => {
++    const { checkHealth, formatHealthReport } = await import("./health.mjs");
++    const report = await checkHealth();
++    return { content: [{ type: "text", text: formatHealthReport(report) }] };
++  }
++);
++
+ // ─── Start ─────────────────────────────────────────────────
+ 
+ async function main() {
+diff --git a/src/shared.mjs b/src/shared.mjs
+index c161e01..32bfd99 100644
+--- a/src/shared.mjs
++++ b/src/shared.mjs
+@@ -353,6 +353,7 @@ function _parseResetHint(text) {
+   if (m && (m[1] || m[2])) {
+     const mins = parseInt(m[1] || "0", 10);
+     const secs = parseInt(m[2] || "0", 10);
++    if (mins === 0 && secs === 0) return null;
+     if (mins > 0) return `${mins}m ${secs}s`;
+     return `${secs}s`;
+   }

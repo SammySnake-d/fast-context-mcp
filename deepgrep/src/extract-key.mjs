@@ -24,7 +24,7 @@ const TOML_API_KEY_FIELDS = [
 
 /**
  * Get platform-specific candidate paths to Windsurf/Devin's state.vscdb.
- * The renamed app uses Deviv on disk; Windsurf is kept as a compatibility fallback.
+ * Devin is the current app name. Deviv and Windsurf are compatibility fallbacks.
  * @param {{ platformName?: string, homeDir?: string, env?: NodeJS.ProcessEnv }} [opts]
  * @returns {string[]}
  */
@@ -34,7 +34,7 @@ export function getDbPathCandidates(opts = {}) {
   const env = opts.env || process.env;
 
   if (plat === "darwin") {
-    return ["Deviv", "Windsurf"].map((appName) =>
+    return ["Devin", "Deviv", "Windsurf"].map((appName) =>
       join(home, "Library", "Application Support", appName, "User", "globalStorage", "state.vscdb")
     );
   }
@@ -42,13 +42,13 @@ export function getDbPathCandidates(opts = {}) {
   if (plat === "win32") {
     const appdata = env.APPDATA || "";
     if (!appdata) throw new Error("Cannot determine APPDATA path");
-    return ["Deviv", "Windsurf"].map((appName) =>
+    return ["Devin", "Deviv", "Windsurf"].map((appName) =>
       join(appdata, appName, "User", "globalStorage", "state.vscdb")
     );
   }
 
   const config = env.XDG_CONFIG_HOME || join(home, ".config");
-  return ["Devin", "Windsurf"].map((appName) =>
+  return ["Devin", "Deviv", "Windsurf"].map((appName) =>
     join(config, appName, "User", "globalStorage", "state.vscdb")
   );
 }

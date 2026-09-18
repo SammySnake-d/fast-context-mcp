@@ -1,5 +1,10 @@
 # Fast Context MCP
 
+[![npm version](https://img.shields.io/npm/v/@sammysnake/fast-context-mcp.svg)](https://www.npmjs.com/package/@sammysnake/fast-context-mcp)
+[![node version](https://img.shields.io/node/v/@sammysnake/fast-context-mcp.svg)](https://nodejs.org)
+[![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![MCPVault: claimed](https://mcpvault.io/badge/fast-context-mcp.svg)](https://mcpvault.io/servers/fast-context-mcp/health?utm_source=external_badge&utm_medium=referral&utm_campaign=mcp_health_report)
+
 AI-driven semantic code search as an MCP tool — powered by Windsurf's reverse-engineered SWE-grep protocol.
 
 Any MCP-compatible client (Claude Code, Claude Desktop, Cursor, etc.) can use this to search codebases with natural language queries. All tools are bundled via npm — **no system-level dependencies** needed (ripgrep via `@vscode/ripgrep`, tree via `tree-node-cli`). Works on macOS, Windows, and Linux.

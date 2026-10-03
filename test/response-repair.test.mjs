@@ -17,6 +17,51 @@ describe("malformed restricted_exec response repair", () => {
     assert.deepEqual(parsed, { path: "/codebase/system", exclude: [] });
   });
 
+  it("repairs a key/value separator collapsed into an underscore", () => {
+    const parsed = parseJsonWithRepair(
+      '{"type":"readfile","file":"/codebase/src/a.mjs","start_4, "end_9}',
+    );
+    assert.deepEqual(parsed, {
+      type: "readfile",
+      file: "/codebase/src/a.mjs",
+      start_line: 4,
+      end_line: 9,
+    });
+  });
+
+  it("keeps a real-world collapsed-separator payload executable", () => {
+    // Captured from a live remote search (2026-10): the backend model dropped
+    // the `": ` separators from every readfile line range in one turn.
+    const raw =
+      '[TOOL_CALLS]restricted_exec[ARGS]{"command1": {"type": "readfile", ' +
+      '"file": "/codebase/src/orient.py", "start_350, "end_450}, ' +
+      '"command2": {"type": "rg", "pattern": "line.*score", "path": "/codebase/src"}, ' +
+      '"command3": {"type": "rg", "pattern": "perspective", "path": "/codebase/tests"}}';
+    const parsed = _parseToolCall(raw);
+    assert.equal(parsed[1], "restricted_exec");
+    const commands = Object.values(parsed[2]);
+    assert.equal(commands.length, 3);
+    assert.equal(commands[0].type, "readfile");
+    assert.equal(commands[0].file, "/codebase/src/orient.py");
+    assert.equal(commands[0].start_line, 350);
+    assert.equal(commands[0].end_line, 450);
+    assert.equal(commands[2].pattern, "perspective");
+  });
+
+  it("does not let a loose readfile clobber a salvaged structured command", () => {
+    // command2 is unparseable and dropped, so the loose readfile must take a
+    // free key instead of overwriting the salvaged command3.
+    const raw =
+      '[TOOL_CALLS]restricted_exec[ARGS]{"command1":{"type":"rg","pattern":"a","path":"/codebase/src"},' +
+      '"command2":{"type":"readfile","file":"/codebase/src/broken.mjs","start_x}, ' +
+      '"command3":{"type":"rg","pattern":"c","path":"/codebase/tests"}, ' +
+      '"command4":{"type":"readfile","file":"/codebase/src/loose.mjs"}}';
+    const args = salvageRestrictedExecArgs(raw);
+    assert.equal(args.command1.pattern, "a");
+    assert.equal(args.command3.pattern, "c");
+    assert.equal(args.command4.file, "/codebase/src/loose.mjs");
+  });
+
   it("keeps a malformed restricted_exec turn executable", () => {
     const raw = '[TOOL_CALLS]restricted_exec[ARGS]{"command1":{"type":"rg","pattern":"PROTONET_LOG","path":"/codebase/system",exclude":[]}}';
     const parsed = _parseToolCall(raw);

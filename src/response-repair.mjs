@@ -6,6 +6,13 @@ export function repairJsonText(text) {
   return String(text)
     .replace(/([{,]\s*)([A-Za-z_$][\w$-]*)"\s*:/g, '$1"$2":')
     .replace(/([{,]\s*)([A-Za-z_$][\w$-]*)\s*:/g, '$1"$2":')
+    // `"start": 350` sometimes degrades to `"start_350` (the `": ` separator
+    // collapses into the underscore); only fires when no value follows. The
+    // executor consumes start_line/end_line, so remap the model's aliases.
+    .replace(/([{,]\s*)"([A-Za-z_$][\w$-]*)_(-?\d+)(?=\s*[,}])/g, (_match, prefix, key, value) => {
+      const field = key === "start" ? "start_line" : key === "end" ? "end_line" : key;
+      return `${prefix}"${field}": ${value}`;
+    })
     .replace(/,\s*([}\]])/g, "$1");
 }
 
@@ -92,7 +99,14 @@ export function salvageRestrictedExecArgs(text) {
     const signature = JSON.stringify(command);
     if (seen.has(signature)) return;
     seen.add(signature);
-    result[key && !result[key] ? key : `command${Object.keys(result).length + 1}`] = command;
+    if (key && !result[key]) {
+      result[key] = command;
+      return;
+    }
+    // Auto-generated keys must never overwrite a salvaged structured command.
+    let n = 1;
+    while (result[`command${n}`]) n++;
+    result[`command${n}`] = command;
   };
 
   for (const [key, command] of collectCommands(String(text))) add(key, command);
